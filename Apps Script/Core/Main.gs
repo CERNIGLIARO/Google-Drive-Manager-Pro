@@ -1,26 +1,34 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Main.gs
- * Version : 2.0.0
+ * Version : 2.0.1
  *
  * RÔLE
  * ----
- * Point d'entrée central de Google Drive Manager PRO V2.
+ * Point d'entrée principal de Google Drive Manager PRO V2.
  *
- * Ce fichier gère :
- * - initialisation de l'application ;
- * - menu Google Sheets ;
- * - ouverture de l'interface ;
- * - API publique appelée depuis HTML avec google.script.run ;
- * - création des jobs ;
- * - démarrage / pause / reprise / annulation ;
- * - récupération du statut ;
- * - récupération des logs ;
- * - récupération des résultats ;
- * - diagnostic système ;
- * - tests d'autorisation ;
- * - nettoyage technique ;
- * - routage vers les modules métier.
+ * Cette version relie :
+ * - Dashboard.html ;
+ * - Engine.gs ;
+ * - State.gs ;
+ * - Queue.gs ;
+ * - Logger.gs ;
+ * - Explorer.gs ;
+ * - Analysis.gs ;
+ * - Move.gs ;
+ * - Copy.gs ;
+ * - Duplicates.gs ;
+ * - Archive.gs ;
+ * - Rename.gs ;
+ * - FolderTools.gs.
+ *
+ * IMPORTANT
+ * ---------
+ * Ce fichier contient les fonctions globales utilisées par :
+ *
+ * google.script.run
+ *
+ * dans UI/Dashboard.html.
  *
  * DÉPENDANCES
  * -----------
@@ -31,32 +39,14 @@
  * Core/Queue.gs
  * Core/Engine.gs
  *
- * MODULES
- * -------
- * Modules/Explorer.gs
- * Modules/Analysis.gs
- * Modules/Move.gs
- * Modules/Copy.gs
- * Modules/Duplicates.gs
- * Modules/Archive.gs
- * Modules/Rename.gs
- * Modules/FolderTools.gs
- *
- * IMPORTANT
- * ---------
- * - Main.gs ne contient pas la logique métier.
- * - Main.gs sert d'interface entre l'UI, le Core et les Modules.
- * - Aucun fichier Google Drive n'est supprimé automatiquement.
+ * Modules/*
  **************************************************************************************************/
 
 'use strict';
 
 
 /**************************************************************************************************
- * NOM DU FICHIER HTML PRINCIPAL
- *
- * Il pourra être remplacé ultérieurement par le nom définitif du fichier UI sans toucher au reste
- * du Core.
+ * NOM DU FICHIER HTML
  **************************************************************************************************/
 
 const GDM_MAIN_HTML_FILE = 'Dashboard';
@@ -72,48 +62,58 @@ function onOpen() {
 
     SpreadsheetApp
       .getUi()
-      .createMenu('🧰 DRIVE MANAGER PRO')
+      .createMenu(
+        '🧰 DRIVE MANAGER PRO'
+      )
+
       .addItem(
-        '🚀 Ouvrir Google Drive Manager PRO',
+        '🏠 Ouvrir Drive Manager PRO',
         'GDM_openDashboard'
       )
+
       .addSeparator()
+
       .addItem(
-        '✅ Autoriser / tester',
+        '✅ Autoriser / Tester',
         'GDM_authorizeAndTest'
       )
+
       .addItem(
-        '🔍 Diagnostic système',
+        '🩺 Diagnostic système',
         'GDM_showSystemDiagnostic'
       )
+
       .addSeparator()
+
       .addItem(
-        '▶ Continuer le job courant',
+        '▶ Continuer maintenant',
         'GDM_continueCurrentJob'
       )
+
       .addItem(
         '⏸ Mettre en pause',
         'GDM_pauseCurrentJob'
       )
+
       .addItem(
-        '⛔ Annuler le job courant',
+        '⛔ Annuler le traitement',
         'GDM_cancelCurrentJob'
       )
+
       .addSeparator()
+
       .addItem(
-        '🧹 Nettoyage technique',
+        '🧹 Nettoyer les données techniques',
         'GDM_cleanupTechnicalData'
       )
+
       .addToUi();
 
   } catch (error) {
 
-    try {
-      console.error(
-        '[GDM PRO] Erreur onOpen : ' +
-        GDM_Utils.getErrorMessage(error)
-      );
-    } catch (ignored) {}
+    console.error(
+      error
+    );
   }
 }
 
@@ -123,12 +123,13 @@ function onOpen() {
  **************************************************************************************************/
 
 function onInstall() {
+
   onOpen();
 }
 
 
 /**************************************************************************************************
- * API CENTRALE
+ * MAIN
  **************************************************************************************************/
 
 const GDM_Main = Object.freeze({
@@ -141,31 +142,45 @@ const GDM_Main = Object.freeze({
   getAppInfo: function() {
 
     return {
-      ok: true,
 
-      app:
-        GDM_Config.getAppInfo(),
+      name:
+        GDM_APP.NAME,
 
-      config:
-        GDM_Config.getPublicConfig(),
+      shortName:
+        GDM_APP.SHORT_NAME,
 
-      currentJob:
-        GDM_State.getCurrent
-          ? GDM_State.getCurrent()
-          : null,
+      version:
+        GDM_APP.VERSION,
 
-      currentJobSummary:
-        GDM_State.getCurrentJobId()
-          ? GDM_State.getSummary(
-              GDM_State.getCurrentJobId()
-            )
-          : null
+      buildDate:
+        GDM_APP.BUILD_DATE,
+
+      environment:
+        GDM_APP.ENVIRONMENT,
+
+      timezone:
+        GDM_Config.get(
+          'APP.TIMEZONE',
+          'Europe/Brussels'
+        ),
+
+      safeMode:
+        GDM_Config.get(
+          'APP.SAFE_MODE',
+          true
+        ),
+
+      automaticDelete:
+        GDM_Config.get(
+          'APP.ALLOW_AUTOMATIC_DELETE',
+          false
+        )
     };
   },
 
 
   /************************************************************************************************
-   * INITIALISATION DE L'INTERFACE
+   * INITIALISATION DASHBOARD
    ************************************************************************************************/
 
   initialize: function() {
@@ -173,36 +188,72 @@ const GDM_Main = Object.freeze({
     var currentJobId =
       GDM_State.getCurrentJobId();
 
-    var currentState = null;
-    var queue = null;
 
-    if (currentJobId) {
+    var state =
+      null;
 
-      currentState =
+
+    var queue =
+      null;
+
+
+    if (
+      currentJobId
+    ) {
+
+      state =
         GDM_State.getSummary(
           currentJobId
         );
 
-      queue =
-        GDM_Queue.getMeta(
+
+      if (
+        GDM_Queue.exists(
           currentJobId
-        );
+        )
+      ) {
+
+        queue =
+          GDM_Queue.getMeta(
+            currentJobId
+          );
+      }
     }
 
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       app:
-        GDM_Config.getAppInfo(),
+        {
+
+          NAME:
+            GDM_APP.NAME,
+
+          SHORT_NAME:
+            GDM_APP.SHORT_NAME,
+
+          VERSION:
+            GDM_APP.VERSION,
+
+          BUILD_DATE:
+            GDM_APP.BUILD_DATE,
+
+          ENVIRONMENT:
+            GDM_APP.ENVIRONMENT
+        },
 
       config:
         GDM_Config.getPublicConfig(),
 
       currentJobId:
-        currentJobId || '',
+        currentJobId ||
+        '',
 
       state:
-        currentState,
+        state,
 
       queue:
         queue,
@@ -214,18 +265,21 @@ const GDM_Main = Object.freeze({
 
 
   /************************************************************************************************
-   * CRÉATION STANDARD D'UN JOB
+   * CRÉER UN JOB GÉNÉRIQUE
    ************************************************************************************************/
 
   createJob: function(options) {
 
-    options = options || {};
+    options =
+      options ||
+      {};
+
 
     var moduleName =
-      GDM_Utils.requireString(
-        options.module,
-        'module'
+      this.requireModule_(
+        options.module
       );
+
 
     var action =
       GDM_Utils.requireString(
@@ -233,19 +287,10 @@ const GDM_Main = Object.freeze({
         'action'
       );
 
-    if (
-      !GDM_Config.isValidModule(
-        moduleName
-      )
-    ) {
-      throw new Error(
-        'Module invalide : ' +
-        moduleName
-      );
-    }
 
     var state =
       GDM_State.create({
+
         module:
           moduleName,
 
@@ -253,19 +298,26 @@ const GDM_Main = Object.freeze({
           action,
 
         source:
-          options.source || null,
+          options.source ||
+          {},
 
         destination:
-          options.destination || null,
+          options.destination ||
+          {},
 
         parameters:
-          options.parameters || {},
+          options.parameters ||
+          {},
 
         totalKnown:
-          options.totalKnown || 0,
+          Number(
+            options.totalKnown ||
+            0
+          ),
 
         metadata:
-          options.metadata || {},
+          options.metadata ||
+          {},
 
         setCurrent:
           true,
@@ -275,12 +327,37 @@ const GDM_Main = Object.freeze({
           'Job créé.'
       });
 
+
     GDM_Queue.create(
       state.jobId
     );
 
+
+    try {
+
+      GDM_Logger.jobCreated(
+        state.jobId,
+        {
+
+          module:
+            moduleName,
+
+          action:
+            action,
+
+          message:
+            options.message ||
+            'Job créé.'
+        }
+      );
+
+    } catch (ignored) {}
+
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         state.jobId,
@@ -299,7 +376,7 @@ const GDM_Main = Object.freeze({
 
 
   /************************************************************************************************
-   * AJOUT DE TÂCHES
+   * AJOUTER DES TÂCHES
    ************************************************************************************************/
 
   addTasks: function(
@@ -313,44 +390,75 @@ const GDM_Main = Object.freeze({
         'jobId'
       );
 
+
     tasks =
       GDM_Utils.ensureArray(
         tasks
       );
 
-    var added =
-      GDM_Queue.addInBatches(
-        jobId,
-        tasks,
-        GDM_Config.get(
-          'QUEUE.MAX_ITEMS_PER_BATCH',
-          250
-        )
-      );
 
-    GDM_State.setTotalKnown(
+    if (
+      !tasks.length
+    ) {
+
+      return {
+
+        ok:
+          true,
+
+        jobId:
+          jobId,
+
+        added:
+          0
+      };
+    }
+
+
+    GDM_Queue.ensure(
+      jobId
+    );
+
+
+    GDM_Queue.addInBatches(
       jobId,
-      GDM_Queue.count(
-        jobId
+      tasks,
+      GDM_Config.get(
+        'QUEUE.MAX_ITEMS_PER_BATCH',
+        250
       )
     );
 
+
+    var state =
+      GDM_State.require(
+        jobId
+      );
+
+
+    GDM_State.setTotalKnown(
+      jobId,
+      Number(
+        state.totalKnown ||
+        0
+      ) +
+      tasks.length
+    );
+
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
 
       added:
-        added.length,
+        tasks.length,
 
       queue:
         GDM_Queue.getMeta(
-          jobId
-        ),
-
-      state:
-        GDM_State.getSummary(
           jobId
         )
     };
@@ -358,7 +466,7 @@ const GDM_Main = Object.freeze({
 
 
   /************************************************************************************************
-   * DÉMARRAGE
+   * DÉMARRER JOB
    ************************************************************************************************/
 
   startJob: function(
@@ -366,11 +474,10 @@ const GDM_Main = Object.freeze({
     options
   ) {
 
-    options = options || {};
-
     return GDM_Engine.start(
       jobId,
-      options
+      options ||
+      {}
     );
   },
 
@@ -380,14 +487,16 @@ const GDM_Main = Object.freeze({
     return GDM_Engine.start(
       jobId,
       {
-        async: true
+
+        async:
+          true
       }
     );
   },
 
 
   /************************************************************************************************
-   * UN LOT
+   * CONTINUER
    ************************************************************************************************/
 
   continueJob: function(jobId) {
@@ -396,13 +505,19 @@ const GDM_Main = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     if (!jobId) {
+
       return {
-        ok: false,
+
+        ok:
+          false,
+
         message:
-          'Aucun job à continuer.'
+          'Aucun traitement en cours.'
       };
     }
+
 
     return GDM_Engine.runOneBatch(
       jobId
@@ -420,16 +535,27 @@ const GDM_Main = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     if (!jobId) {
+
       return {
-        ok: false,
+
+        ok:
+          false,
+
         message:
-          'Aucun job actif.'
+          'Aucun traitement en cours.'
       };
     }
 
+
     return {
-      ok: true,
+
+      ok:
+        true,
+
+      jobId:
+        jobId,
 
       state:
         GDM_Engine.pause(
@@ -452,22 +578,32 @@ const GDM_Main = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     if (!jobId) {
+
       return {
-        ok: false,
+
+        ok:
+          false,
+
         message:
-          'Aucun job à reprendre.'
+          'Aucun traitement en cours.'
       };
     }
+
 
     return GDM_Engine.resume(
       jobId,
       {
+
         async:
-          GDM_Utils.toBoolean(
-            asyncMode,
-            false
-          )
+          typeof asyncMode ===
+            'undefined'
+            ? true
+            : GDM_Utils.toBoolean(
+                asyncMode,
+                true
+              )
       }
     );
   },
@@ -483,83 +619,30 @@ const GDM_Main = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
-    if (!jobId) {
-      return {
-        ok: false,
-        message:
-          'Aucun job actif.'
-      };
-    }
-
-    return {
-      ok: true,
-
-      state:
-        GDM_Engine.cancel(
-          jobId
-        )
-    };
-  },
-
-
-  /************************************************************************************************
-   * STATUT
-   ************************************************************************************************/
-
-  getJobStatus: function(jobId) {
-
-    jobId =
-      jobId ||
-      GDM_State.getCurrentJobId();
 
     if (!jobId) {
 
       return {
-        ok: true,
-        active: false,
-        jobId: '',
-        state: null,
-        queue: null
-      };
-    }
 
-    var state =
-      GDM_State.getSummary(
-        jobId
-      );
-
-    if (!state) {
-
-      return {
-        ok: false,
-        active: false,
-        jobId:
-          jobId,
+        ok:
+          false,
 
         message:
-          'Job introuvable.'
+          'Aucun traitement en cours.'
       };
     }
 
-    return {
-      ok: true,
 
-      active:
-        state.status ===
-          GDM_JOB_STATUS.PENDING ||
-        state.status ===
-          GDM_JOB_STATUS.RUNNING ||
-        state.status ===
-          GDM_JOB_STATUS.PAUSED,
+    return {
+
+      ok:
+        true,
 
       jobId:
         jobId,
 
       state:
-        state,
-
-      queue:
-        GDM_Queue.getMeta(
+        GDM_Engine.cancel(
           jobId
         )
     };
@@ -575,24 +658,136 @@ const GDM_Main = Object.freeze({
     var jobId =
       GDM_State.getCurrentJobId();
 
+
     if (!jobId) {
 
       return {
-        ok: true,
-        jobId: '',
-        state: null,
-        queue: null
+
+        ok:
+          true,
+
+        jobId:
+          '',
+
+        state:
+          null,
+
+        queue:
+          null,
+
+        result:
+          null
       };
     }
 
-    return this.getJobStatus(
-      jobId
-    );
+
+    var state =
+      GDM_State.getSummary(
+        jobId
+      );
+
+
+    var queue =
+      null;
+
+
+    if (
+      GDM_Queue.exists(
+        jobId
+      )
+    ) {
+
+      queue =
+        GDM_Queue.getMeta(
+          jobId
+        );
+    }
+
+
+    return {
+
+      ok:
+        true,
+
+      jobId:
+        jobId,
+
+      state:
+        state,
+
+      queue:
+        queue,
+
+      result:
+        GDM_State.getResult(
+          jobId
+        )
+    };
   },
 
 
   /************************************************************************************************
-   * RÉSULTATS
+   * STATUT JOB
+   ************************************************************************************************/
+
+  getJobStatus: function(jobId) {
+
+    jobId =
+      jobId ||
+      GDM_State.getCurrentJobId();
+
+
+    if (!jobId) {
+
+      return {
+
+        ok:
+          true,
+
+        jobId:
+          '',
+
+        state:
+          null,
+
+        queue:
+          null
+      };
+    }
+
+
+    return {
+
+      ok:
+        true,
+
+      jobId:
+        jobId,
+
+      engine:
+        GDM_Engine.getStatus(
+          jobId
+        ),
+
+      state:
+        GDM_State.getSummary(
+          jobId
+        ),
+
+      queue:
+        GDM_Queue.exists(
+          jobId
+        )
+          ? GDM_Queue.getMeta(
+              jobId
+            )
+          : null
+    };
+  },
+
+
+  /************************************************************************************************
+   * RÉSULTAT JOB
    ************************************************************************************************/
 
   getJobResult: function(jobId) {
@@ -603,8 +798,11 @@ const GDM_Main = Object.freeze({
         'jobId'
       );
 
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
@@ -632,53 +830,143 @@ const GDM_Main = Object.freeze({
   ) {
 
     jobId =
-      GDM_Utils.requireString(
-        jobId,
-        'jobId'
-      );
+      jobId ||
+      GDM_State.getCurrentJobId();
+
+
+    if (!jobId) {
+
+      return {
+
+        ok:
+          true,
+
+        jobId:
+          '',
+
+        logs:
+          []
+      };
+    }
+
 
     options =
-      options || {};
+      options ||
+      {};
+
+
+    var logs =
+      GDM_Logger.getLogs(
+        jobId,
+        options
+      );
+
+
+    /*
+     * Compatibilité si Logger retourne déjà un wrapper.
+     */
+    if (
+      logs &&
+      !Array.isArray(
+        logs
+      ) &&
+      Array.isArray(
+        logs.logs
+      )
+    ) {
+
+      logs =
+        logs.logs;
+    }
+
+
+    if (
+      !Array.isArray(
+        logs
+      )
+    ) {
+
+      logs =
+        [];
+    }
+
+
+    var limit =
+      GDM_Utils.toPositiveInteger(
+        options.limit,
+        GDM_Config.get(
+          'UI.LOG_PAGE_SIZE',
+          100
+        )
+      );
+
+
+    if (
+      logs.length >
+      limit
+    ) {
+
+      logs =
+        logs.slice(
+          logs.length -
+          limit
+        );
+    }
+
 
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
 
-      stats:
-        GDM_Logger.getStats(
-          jobId
-        ),
+      count:
+        logs.length,
 
       logs:
-        GDM_Logger.getLogs(
-          jobId,
-          options
-        )
+        logs
     };
   },
 
 
   /************************************************************************************************
-   * LISTE DES JOBS
+   * LISTE JOBS
    ************************************************************************************************/
 
   listJobs: function(options) {
 
+    options =
+      options ||
+      {};
+
+
+    var jobs =
+      GDM_State.list(
+        options
+      );
+
+
     return {
-      ok: true,
+
+      ok:
+        true,
+
+      count:
+        jobs
+          ? jobs.length
+          : 0,
 
       jobs:
-        GDM_State.list(
-          options || {}
-        )
+        jobs ||
+        []
     };
   },
 
 
   /************************************************************************************************
-   * RÉCUPÉRATION APRÈS INTERRUPTION
+   * RÉCUPÉRER UN JOB
    ************************************************************************************************/
 
   recoverJob: function(jobId) {
@@ -690,44 +978,20 @@ const GDM_Main = Object.freeze({
 
 
   /************************************************************************************************
-   * EXPLORER
+   * EXPLORER : RACINE
    ************************************************************************************************/
 
   getRootFolder: function() {
-
-    this.requireModule_(
-      'GDM_Explorer',
-      GDM_MODULES.EXPLORER
-    );
-
-    if (
-      typeof GDM_Explorer.getRoot !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Explorer.getRoot() est indisponible.'
-      );
-    }
 
     return GDM_Explorer.getRoot();
   },
 
 
+  /************************************************************************************************
+   * EXPLORER : DOSSIER
+   ************************************************************************************************/
+
   getFolder: function(folderId) {
-
-    this.requireModule_(
-      'GDM_Explorer',
-      GDM_MODULES.EXPLORER
-    );
-
-    if (
-      typeof GDM_Explorer.getFolder !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Explorer.getFolder() est indisponible.'
-      );
-    }
 
     return GDM_Explorer.getFolder(
       folderId
@@ -735,234 +999,173 @@ const GDM_Main = Object.freeze({
   },
 
 
+  /************************************************************************************************
+   * EXPLORER : ENFANTS
+   ************************************************************************************************/
+
   getFolderChildren: function(
     folderId,
     options
   ) {
 
-    this.requireModule_(
-      'GDM_Explorer',
-      GDM_MODULES.EXPLORER
-    );
-
-    if (
-      typeof GDM_Explorer.getChildren !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Explorer.getChildren() est indisponible.'
-      );
-    }
-
     return GDM_Explorer.getChildren(
       folderId,
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * LANCEMENT ANALYSE
+   * ANALYSE
    ************************************************************************************************/
 
   startAnalysis: function(options) {
 
+    options =
+      options ||
+      {};
+
+
     this.requireModule_(
-      'GDM_Analysis',
       GDM_MODULES.ANALYSIS
     );
 
-    if (
-      typeof GDM_Analysis.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Analysis.start() est indisponible.'
-      );
-    }
 
     return GDM_Analysis.start(
-      options || {}
+      options
     );
   },
 
 
   /************************************************************************************************
-   * LANCEMENT DÉPLACEMENT
+   * MOVE PREVIEW
+   ************************************************************************************************/
+
+  previewMove: function(options) {
+
+    this.requireModule_(
+      GDM_MODULES.MOVE
+    );
+
+
+    return GDM_Move.preview(
+      options ||
+      {}
+    );
+  },
+
+
+  /************************************************************************************************
+   * MOVE
    ************************************************************************************************/
 
   startMove: function(options) {
 
     this.requireModule_(
-      'GDM_Move',
       GDM_MODULES.MOVE
     );
 
-    if (
-      typeof GDM_Move.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Move.start() est indisponible.'
-      );
-    }
 
     return GDM_Move.start(
-      options || {}
-    );
-  },
-
-
-  previewMove: function(options) {
-
-    this.requireModule_(
-      'GDM_Move',
-      GDM_MODULES.MOVE
-    );
-
-    if (
-      typeof GDM_Move.preview !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Move.preview() est indisponible.'
-      );
-    }
-
-    return GDM_Move.preview(
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * LANCEMENT COPIE
+   * COPY
    ************************************************************************************************/
 
   startCopy: function(options) {
 
     this.requireModule_(
-      'GDM_Copy',
       GDM_MODULES.COPY
     );
 
-    if (
-      typeof GDM_Copy.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Copy.start() est indisponible.'
-      );
-    }
 
     return GDM_Copy.start(
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * DOUBLONS
+   * DUPLICATES
    ************************************************************************************************/
 
   startDuplicates: function(options) {
 
     this.requireModule_(
-      'GDM_Duplicates',
       GDM_MODULES.DUPLICATES
     );
 
-    if (
-      typeof GDM_Duplicates.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Duplicates.start() est indisponible.'
-      );
-    }
 
     return GDM_Duplicates.start(
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * ARCHIVAGE
+   * ARCHIVE
    ************************************************************************************************/
 
   startArchive: function(options) {
 
     this.requireModule_(
-      'GDM_Archive',
       GDM_MODULES.ARCHIVE
     );
 
-    if (
-      typeof GDM_Archive.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Archive.start() est indisponible.'
-      );
-    }
 
     return GDM_Archive.start(
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * RENOMMAGE
+   * RENAME PREVIEW
    ************************************************************************************************/
 
   previewRename: function(options) {
 
     this.requireModule_(
-      'GDM_Rename',
       GDM_MODULES.RENAME
     );
 
-    if (
-      typeof GDM_Rename.preview !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Rename.preview() est indisponible.'
-      );
-    }
 
     return GDM_Rename.preview(
-      options || {}
-    );
-  },
-
-
-  startRename: function(options) {
-
-    this.requireModule_(
-      'GDM_Rename',
-      GDM_MODULES.RENAME
-    );
-
-    if (
-      typeof GDM_Rename.start !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_Rename.start() est indisponible.'
-      );
-    }
-
-    return GDM_Rename.start(
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * OUTILS DOSSIERS
+   * RENAME
+   ************************************************************************************************/
+
+  startRename: function(options) {
+
+    this.requireModule_(
+      GDM_MODULES.RENAME
+    );
+
+
+    return GDM_Rename.start(
+      options ||
+      {}
+    );
+  },
+
+
+  /************************************************************************************************
+   * FOLDER TOOLS
    ************************************************************************************************/
 
   folderTools: function(
@@ -971,141 +1174,148 @@ const GDM_Main = Object.freeze({
   ) {
 
     this.requireModule_(
-      'GDM_FolderTools',
       GDM_MODULES.FOLDER_TOOLS
     );
 
-    if (
-      typeof GDM_FolderTools.execute !==
-      'function'
-    ) {
-      throw new Error(
-        'GDM_FolderTools.execute() est indisponible.'
-      );
-    }
 
     return GDM_FolderTools.execute(
       action,
-      options || {}
+      options ||
+      {}
     );
   },
 
 
   /************************************************************************************************
-   * AUTORISATIONS
+   * AUTORISATION / TEST
    ************************************************************************************************/
 
   authorizeAndTest: function() {
 
     var tests = [];
 
-    /*
-     * Google Drive
-     */
+
+    /**********************************************************************************************
+     * DRIVE
+     **********************************************************************************************/
+
     tests.push(
       this.runTest_(
         'Google Drive',
         function() {
+
           var root =
             DriveApp.getRootFolder();
 
+
           return Boolean(
+            root &&
             root.getId()
           );
         }
       )
     );
 
-    /*
-     * Google Sheets
-     */
+
+    /**********************************************************************************************
+     * SPREADSHEET
+     **********************************************************************************************/
+
     tests.push(
       this.runTest_(
         'Google Sheets',
         function() {
-          var active =
-            SpreadsheetApp
-              .getActiveSpreadsheet();
 
-          /*
-           * Le projet peut éventuellement être autonome.
-           * L'accès à SpreadsheetApp reste testé sans obliger
-           * l'existence d'une feuille liée.
-           */
-          return active
-            ? Boolean(active.getId())
-            : true;
+          var ss =
+            SpreadsheetApp.getActive();
+
+
+          return Boolean(
+            ss
+          );
         }
       )
     );
 
-    /*
-     * PropertiesService
-     */
+
+    /**********************************************************************************************
+     * PROPERTIES
+     **********************************************************************************************/
+
     tests.push(
       this.runTest_(
         'PropertiesService',
         function() {
 
-          var key =
-            'GDMV2_AUTH_TEST';
-
           var properties =
-            PropertiesService
-              .getScriptProperties();
+            PropertiesService.getScriptProperties();
+
 
           properties.setProperty(
-            key,
+            'GDMV2_AUTH_TEST',
             'OK'
           );
 
-          var ok =
+
+          var value =
             properties.getProperty(
-              key
-            ) === 'OK';
+              'GDMV2_AUTH_TEST'
+            );
+
 
           properties.deleteProperty(
-            key
+            'GDMV2_AUTH_TEST'
           );
 
-          return ok;
+
+          return value ===
+            'OK';
         }
       )
     );
 
-    /*
-     * LockService
-     */
+
+    /**********************************************************************************************
+     * LOCK
+     **********************************************************************************************/
+
     tests.push(
       this.runTest_(
         'LockService',
         function() {
 
           var lock =
-            LockService
-              .getScriptLock();
+            LockService.getScriptLock();
 
-          var ok =
-            lock.tryLock(
-              1000
-            );
 
-          if (ok) {
-            lock.releaseLock();
+          if (
+            !lock.tryLock(
+              2000
+            )
+          ) {
+
+            return false;
           }
 
-          return ok;
+
+          lock.releaseLock();
+
+
+          return true;
         }
       )
     );
 
-    /*
-     * Utilities
-     */
+
+    /**********************************************************************************************
+     * UTILITIES
+     **********************************************************************************************/
+
     tests.push(
       this.runTest_(
         'Utilities',
         function() {
+
           return Boolean(
             Utilities.getUuid()
           );
@@ -1113,29 +1323,28 @@ const GDM_Main = Object.freeze({
       )
     );
 
-    var ok = true;
 
-    for (
-      var i = 0;
-      i < tests.length;
-      i++
-    ) {
-      if (
-        tests[i].ok !== true
-      ) {
-        ok = false;
-        break;
-      }
-    }
+    var ok =
+      tests.every(
+        function(test) {
+
+          return test.ok;
+        }
+      );
+
 
     return {
-      ok: ok,
 
-      app:
-        GDM_Config.getAppInfo(),
+      ok:
+        ok,
 
       tests:
-        tests
+        tests,
+
+      message:
+        ok
+          ? 'Toutes les autorisations principales sont opérationnelles.'
+          : 'Une ou plusieurs autorisations doivent être vérifiées.'
     };
   },
 
@@ -1146,103 +1355,235 @@ const GDM_Main = Object.freeze({
 
   diagnostic: function() {
 
-    var results = [];
+    var core = [];
 
-    results.push(
+    var modules = [];
+
+
+    /**********************************************************************************************
+     * CONFIG
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'Config',
+        'Config.gs',
         function() {
+
           return GDM_Config.validate();
         }
       )
     );
 
-    results.push(
+
+    /**********************************************************************************************
+     * UTILS
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'Utils',
+        'Utils.gs',
         function() {
+
           return GDM_Utils.validate();
         }
       )
     );
 
-    results.push(
+
+    /**********************************************************************************************
+     * LOGGER
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'Logger',
+        'Logger.gs',
         function() {
+
           return GDM_Logger.validate();
         }
       )
     );
 
-    results.push(
+
+    /**********************************************************************************************
+     * STATE
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'State',
+        'State.gs',
         function() {
+
           return GDM_State.validate();
         }
       )
     );
 
-    results.push(
+
+    /**********************************************************************************************
+     * QUEUE
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'Queue',
+        'Queue.gs',
         function() {
+
           return GDM_Queue.validate();
         }
       )
     );
 
-    results.push(
+
+    /**********************************************************************************************
+     * ENGINE
+     **********************************************************************************************/
+
+    core.push(
       this.safeValidate_(
-        'Engine',
+        'Engine.gs',
         function() {
+
           return GDM_Engine.validate();
         }
       )
     );
 
-    var modules =
-      GDM_Engine.getModuleStatus();
 
-    var allCoreOk = true;
+    /**********************************************************************************************
+     * MODULES
+     **********************************************************************************************/
 
-    for (
-      var i = 0;
-      i < results.length;
-      i++
-    ) {
+    modules.push(
+      this.safeValidate_(
+        'Explorer.gs',
+        function() {
 
-      if (
-        results[i].ok !== true
-      ) {
-        allCoreOk = false;
-      }
-    }
+          return GDM_Explorer.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Analysis.gs',
+        function() {
+
+          return GDM_Analysis.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Move.gs',
+        function() {
+
+          return GDM_Move.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Copy.gs',
+        function() {
+
+          return GDM_Copy.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Duplicates.gs',
+        function() {
+
+          return GDM_Duplicates.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Archive.gs',
+        function() {
+
+          return GDM_Archive.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'Rename.gs',
+        function() {
+
+          return GDM_Rename.validate();
+        }
+      )
+    );
+
+
+    modules.push(
+      this.safeValidate_(
+        'FolderTools.gs',
+        function() {
+
+          return GDM_FolderTools.validate();
+        }
+      )
+    );
+
+
+    var all =
+      core.concat(
+        modules
+      );
+
+
+    var ok =
+      all.every(
+        function(item) {
+
+          return item.ok;
+        }
+      );
+
 
     return {
+
       ok:
-        allCoreOk,
+        ok,
+
+      timestamp:
+        GDM_Utils.nowIso(),
 
       app:
-        GDM_Config.getAppInfo(),
-
-      authorization:
-        this.authorizeAndTest(),
+        this.getAppInfo(),
 
       core:
-        results,
+        core,
 
       modules:
         modules,
 
-      currentJob:
-        GDM_Engine.getStatus(
-          GDM_State.getCurrentJobId()
-        ),
+      engineModules:
+        GDM_Engine.getModuleStatus(),
 
-      timestamp:
-        GDM_Utils.nowIso()
+      currentJob:
+        this.getCurrentJob(),
+
+      message:
+        ok
+          ? 'Google Drive Manager PRO est opérationnel.'
+          : 'Des erreurs ont été détectées dans le diagnostic.'
     };
   },
 
@@ -1254,124 +1595,87 @@ const GDM_Main = Object.freeze({
   cleanup: function(options) {
 
     options =
-      options || {};
+      options ||
+      {};
+
 
     var days =
       GDM_Utils.toPositiveInteger(
-        options.days,
+        options.completedJobsOlderThanDays,
         GDM_Config.get(
           'STATE.CLEAN_COMPLETED_JOBS_AFTER_DAYS',
           30
         )
       );
 
-    var oldJobs =
+
+    var stateCleanup =
       GDM_State.cleanupOldJobs(
         days
       );
 
-    var triggersRemoved = 0;
 
-    if (
-      GDM_Utils.toBoolean(
-        options.cleanupTriggers,
-        true
-      )
-    ) {
-      triggersRemoved =
+    var removedTriggers =
+      0;
+
+
+    try {
+
+      removedTriggers =
         GDM_Engine.cleanupOwnTriggers_();
-    }
+
+    } catch (ignoredTriggerCleanup) {}
+
 
     return {
-      ok: true,
 
-      oldJobs:
-        oldJobs,
+      ok:
+        true,
 
-      triggersRemoved:
-        triggersRemoved
+      completedJobsOlderThanDays:
+        days,
+
+      stateCleanup:
+        stateCleanup,
+
+      removedOrphanTriggers:
+        removedTriggers
     };
   },
 
 
   /************************************************************************************************
-   * MODULE REQUIRE
+   * MODULE EXISTANT ?
    ************************************************************************************************/
 
-  requireModule_: function(
-    globalName,
-    moduleName
-  ) {
+  requireModule_: function(moduleName) {
 
-    var available = false;
+    moduleName =
+      GDM_Utils.requireString(
+        moduleName,
+        'module'
+      );
 
-    switch (
-      globalName
+
+    if (
+      !GDM_Config.isValidModule(
+        moduleName
+      )
     ) {
 
-      case 'GDM_Explorer':
-        available =
-          typeof GDM_Explorer !==
-          'undefined';
-        break;
-
-      case 'GDM_Analysis':
-        available =
-          typeof GDM_Analysis !==
-          'undefined';
-        break;
-
-      case 'GDM_Move':
-        available =
-          typeof GDM_Move !==
-          'undefined';
-        break;
-
-      case 'GDM_Copy':
-        available =
-          typeof GDM_Copy !==
-          'undefined';
-        break;
-
-      case 'GDM_Duplicates':
-        available =
-          typeof GDM_Duplicates !==
-          'undefined';
-        break;
-
-      case 'GDM_Archive':
-        available =
-          typeof GDM_Archive !==
-          'undefined';
-        break;
-
-      case 'GDM_Rename':
-        available =
-          typeof GDM_Rename !==
-          'undefined';
-        break;
-
-      case 'GDM_FolderTools':
-        available =
-          typeof GDM_FolderTools !==
-          'undefined';
-        break;
-    }
-
-    if (!available) {
       throw new Error(
-        'Module ' +
-        moduleName +
-        ' indisponible.'
+        'Module invalide : ' +
+        moduleName
       );
     }
 
-    return true;
+
+    return moduleName;
   },
 
 
   /************************************************************************************************
-   * HELPERS DE TEST
+   * TEST
    ************************************************************************************************/
 
   runTest_: function(
@@ -1381,25 +1685,30 @@ const GDM_Main = Object.freeze({
 
     try {
 
-      var result =
+      var value =
         callback();
 
+
       return {
+
         name:
           name,
 
         ok:
-          result === true,
+          value !==
+          false,
 
         message:
-          result === true
-            ? 'OK'
-            : 'Échec'
+          value ===
+          false
+            ? 'Échec.'
+            : 'OK'
       };
 
     } catch (error) {
 
       return {
+
         name:
           name,
 
@@ -1414,6 +1723,10 @@ const GDM_Main = Object.freeze({
     }
   },
 
+
+  /************************************************************************************************
+   * VALIDATION SÛRE
+   ************************************************************************************************/
 
   safeValidate_: function(
     name,
@@ -1425,30 +1738,54 @@ const GDM_Main = Object.freeze({
       var result =
         callback();
 
+
+      result =
+        result ||
+        {};
+
+
       return {
+
         name:
           name,
 
         ok:
-          Boolean(
-            result &&
-            result.ok
-          ),
+          result.ok ===
+          true,
 
-        result:
-          result
+        details:
+          result,
+
+        message:
+          result.ok ===
+            true
+            ? 'OK'
+            : (
+                Array.isArray(
+                  result.errors
+                ) &&
+                result.errors.length
+                  ? result.errors.join(
+                      ' | '
+                    )
+                  : 'Erreur'
+              )
       };
 
     } catch (error) {
 
       return {
+
         name:
           name,
 
         ok:
           false,
 
-        error:
+        details:
+          null,
+
+        message:
           GDM_Utils.getErrorMessage(
             error
           )
@@ -1460,7 +1797,7 @@ const GDM_Main = Object.freeze({
 
 
 /**************************************************************************************************
- * OUVERTURE DU DASHBOARD
+ * OUVRIR DASHBOARD
  **************************************************************************************************/
 
 function GDM_openDashboard() {
@@ -1469,25 +1806,24 @@ function GDM_openDashboard() {
 
     var html =
       HtmlService
-        .createHtmlOutputFromFile(
+        .createTemplateFromFile(
           GDM_MAIN_HTML_FILE
         )
+        .evaluate()
+
         .setTitle(
           GDM_APP.NAME
-        )
-        .setWidth(
-          1200
-        )
-        .setHeight(
-          800
         );
+
 
     SpreadsheetApp
       .getUi()
       .showModalDialog(
         html,
-        'Google Drive Manager PRO V2'
+        '🧰 ' +
+        GDM_APP.NAME
       );
+
 
   } catch (error) {
 
@@ -1508,7 +1844,7 @@ function GDM_openDashboard() {
 
 
 /**************************************************************************************************
- * AUTORISER / TESTER
+ * MENU : AUTORISER
  **************************************************************************************************/
 
 function GDM_authorizeAndTest() {
@@ -1516,14 +1852,10 @@ function GDM_authorizeAndTest() {
   var result =
     GDM_Main.authorizeAndTest();
 
-  var lines = [
-    'Google Drive Manager PRO V2',
-    '',
-    result.ok
-      ? '✅ Autorisations OK'
-      : '⚠️ Une ou plusieurs autorisations ont échoué.',
-    ''
-  ];
+
+  var lines =
+    [];
+
 
   for (
     var i = 0;
@@ -1531,34 +1863,42 @@ function GDM_authorizeAndTest() {
     i++
   ) {
 
+    var test =
+      result.tests[i];
+
+
     lines.push(
       (
-        result.tests[i].ok
+        test.ok
           ? '✅ '
           : '❌ '
       ) +
-      result.tests[i].name +
+      test.name +
       ' : ' +
-      result.tests[i].message
+      test.message
     );
   }
+
 
   SpreadsheetApp
     .getUi()
     .alert(
-      'Google Drive Manager PRO V2',
-      lines.join('\n'),
+      'Google Drive Manager PRO',
+      lines.join(
+        '\n'
+      ),
       SpreadsheetApp
         .getUi()
         .ButtonSet.OK
     );
+
 
   return result;
 }
 
 
 /**************************************************************************************************
- * DIAGNOSTIC SYSTÈME
+ * MENU : DIAGNOSTIC
  **************************************************************************************************/
 
 function GDM_showSystemDiagnostic() {
@@ -1566,161 +1906,137 @@ function GDM_showSystemDiagnostic() {
   var result =
     GDM_Main.diagnostic();
 
-  var lines = [
-    'Google Drive Manager PRO V2',
-    '',
+
+  var lines =
+    [];
+
+
+  lines.push(
     result.ok
-      ? '✅ Core opérationnel'
-      : '⚠️ Erreur détectée dans le Core.',
+      ? '✅ Système opérationnel'
+      : '⚠️ Des erreurs ont été détectées'
+  );
+
+
+  lines.push(
     ''
-  ];
+  );
 
-  for (
-    var i = 0;
-    i < result.core.length;
-    i++
-  ) {
 
-    var component =
-      result.core[i];
-
-    lines.push(
-      (
-        component.ok
-          ? '✅ '
-          : '❌ '
-      ) +
-      component.name
-    );
-  }
-
-  lines.push('');
-  lines.push('Modules :');
-
-  var moduleNames =
-    Object.keys(
+  var all =
+    result.core.concat(
       result.modules
     );
 
-  for (
-    var m = 0;
-    m < moduleNames.length;
-    m++
-  ) {
 
-    var moduleName =
-      moduleNames[m];
+  for (
+    var i = 0;
+    i < all.length;
+    i++
+  ) {
 
     lines.push(
       (
-        result.modules[moduleName]
+        all[i].ok
           ? '✅ '
-          : '⏳ '
+          : '❌ '
       ) +
-      moduleName
+      all[i].name +
+      (
+        all[i].message
+          ? ' — ' +
+            all[i].message
+          : ''
+      )
     );
   }
+
 
   SpreadsheetApp
     .getUi()
     .alert(
-      'Diagnostic Google Drive Manager PRO',
-      lines.join('\n'),
+      'Diagnostic Drive Manager PRO',
+      lines.join(
+        '\n'
+      ),
       SpreadsheetApp
         .getUi()
         .ButtonSet.OK
     );
 
+
   return result;
 }
 
 
 /**************************************************************************************************
- * CONTINUER LE JOB COURANT
+ * MENU : CONTINUER
  **************************************************************************************************/
 
 function GDM_continueCurrentJob() {
 
-  var jobId =
-    GDM_State.getCurrentJobId();
+  try {
 
-  if (!jobId) {
+    var result =
+      GDM_Main.continueJob();
+
+
+    SpreadsheetApp
+      .getActive()
+      .toast(
+        result.message ||
+        'Lot exécuté.',
+        'Drive Manager PRO',
+        5
+      );
+
+
+    return result;
+
+  } catch (error) {
 
     SpreadsheetApp
       .getUi()
       .alert(
-        'Google Drive Manager PRO',
-        'Aucun job actif.',
+        'Erreur',
+        GDM_Utils.getErrorMessage(
+          error
+        ),
         SpreadsheetApp
           .getUi()
           .ButtonSet.OK
       );
-
-    return null;
   }
-
-  var result =
-    GDM_Main.continueJob(
-      jobId
-    );
-
-  SpreadsheetApp
-    .getActiveSpreadsheet()
-    .toast(
-      result.completed
-        ? 'Traitement terminé.'
-        : 'Lot traité.',
-      'Google Drive Manager PRO',
-      5
-    );
-
-  return result;
 }
 
 
 /**************************************************************************************************
- * PAUSE DU JOB COURANT
+ * MENU : PAUSE
  **************************************************************************************************/
 
 function GDM_pauseCurrentJob() {
 
-  var jobId =
-    GDM_State.getCurrentJobId();
-
-  if (!jobId) {
-
-    SpreadsheetApp
-      .getUi()
-      .alert(
-        'Google Drive Manager PRO',
-        'Aucun job actif.',
-        SpreadsheetApp
-          .getUi()
-          .ButtonSet.OK
-      );
-
-    return null;
-  }
-
   var result =
-    GDM_Main.pauseJob(
-      jobId
-    );
+    GDM_Main.pauseJob();
+
 
   SpreadsheetApp
-    .getActiveSpreadsheet()
+    .getActive()
     .toast(
-      'Mise en pause demandée.',
-      'Google Drive Manager PRO',
+      result.ok
+        ? 'Pause demandée.'
+        : result.message,
+      'Drive Manager PRO',
       5
     );
+
 
   return result;
 }
 
 
 /**************************************************************************************************
- * ANNULATION DU JOB COURANT
+ * MENU : ANNULER
  **************************************************************************************************/
 
 function GDM_cancelCurrentJob() {
@@ -1728,106 +2044,83 @@ function GDM_cancelCurrentJob() {
   var ui =
     SpreadsheetApp.getUi();
 
-  var jobId =
-    GDM_State.getCurrentJobId();
-
-  if (!jobId) {
-
-    ui.alert(
-      'Google Drive Manager PRO',
-      'Aucun job actif.',
-      ui.ButtonSet.OK
-    );
-
-    return null;
-  }
 
   var answer =
     ui.alert(
-      'Annuler le traitement ?',
-      'Le traitement en cours sera arrêté.\n\nLes opérations déjà terminées ne seront pas annulées.',
+      'Annuler le traitement',
+      'Voulez-vous vraiment annuler le traitement en cours ?\n\n' +
+      'Les opérations déjà réalisées ne seront pas annulées.',
       ui.ButtonSet.YES_NO
     );
+
 
   if (
     answer !==
     ui.Button.YES
   ) {
+
     return {
-      ok: false,
-      cancelledByUser: true
+
+      ok:
+        false,
+
+      cancelled:
+        false
     };
   }
 
-  var result =
-    GDM_Main.cancelJob(
-      jobId
-    );
 
-  SpreadsheetApp
-    .getActiveSpreadsheet()
-    .toast(
-      'Traitement annulé.',
-      'Google Drive Manager PRO',
-      5
-    );
-
-  return result;
+  return GDM_Main.cancelJob();
 }
 
 
 /**************************************************************************************************
- * NETTOYAGE TECHNIQUE
+ * MENU : CLEANUP
  **************************************************************************************************/
 
 function GDM_cleanupTechnicalData() {
 
   var result =
-    GDM_Main.cleanup({
-      cleanupTriggers: true
-    });
+    GDM_Main.cleanup();
+
 
   SpreadsheetApp
-    .getUi()
-    .alert(
-      'Google Drive Manager PRO',
-      'Nettoyage terminé.\n\n' +
-      'Jobs supprimés : ' +
-      result.oldJobs.deletedCount +
-      '\n' +
-      'Triggers supprimés : ' +
-      result.triggersRemoved,
-      SpreadsheetApp
-        .getUi()
-        .ButtonSet.OK
+    .getActive()
+    .toast(
+      'Nettoyage terminé.',
+      'Drive Manager PRO',
+      5
     );
+
 
   return result;
 }
 
 
 /**************************************************************************************************
- * API GLOBALE POUR google.script.run
- *
- * Les fonctions suivantes restent globales afin de pouvoir être appelées facilement depuis HTML.
+ * API DASHBOARD
  **************************************************************************************************/
 
 function GDM_apiInitialize() {
+
   return GDM_Main.initialize();
 }
 
 
 function GDM_apiGetAppInfo() {
+
   return GDM_Main.getAppInfo();
 }
 
 
 function GDM_apiGetCurrentJob() {
+
   return GDM_Main.getCurrentJob();
 }
 
 
 function GDM_apiGetJobStatus(jobId) {
+
   return GDM_Main.getJobStatus(
     jobId
   );
@@ -1838,21 +2131,46 @@ function GDM_apiGetJobLogs(
   jobId,
   options
 ) {
+
   return GDM_Main.getJobLogs(
     jobId,
-    options || {}
+    options ||
+    {}
   );
 }
 
 
 function GDM_apiGetJobResult(jobId) {
+
   return GDM_Main.getJobResult(
     jobId
   );
 }
 
 
+function GDM_apiListJobs(options) {
+
+  return GDM_Main.listJobs(
+    options ||
+    {}
+  );
+}
+
+
+function GDM_apiRecoverJob(jobId) {
+
+  return GDM_Main.recoverJob(
+    jobId
+  );
+}
+
+
+/**************************************************************************************************
+ * API JOB ACTIONS
+ **************************************************************************************************/
+
 function GDM_apiContinueJob(jobId) {
+
   return GDM_Main.continueJob(
     jobId
   );
@@ -1860,6 +2178,7 @@ function GDM_apiContinueJob(jobId) {
 
 
 function GDM_apiPauseJob(jobId) {
+
   return GDM_Main.pauseJob(
     jobId
   );
@@ -1870,6 +2189,7 @@ function GDM_apiResumeJob(
   jobId,
   asyncMode
 ) {
+
   return GDM_Main.resumeJob(
     jobId,
     asyncMode
@@ -1878,18 +2198,25 @@ function GDM_apiResumeJob(
 
 
 function GDM_apiCancelJob(jobId) {
+
   return GDM_Main.cancelJob(
     jobId
   );
 }
 
 
+/**************************************************************************************************
+ * API EXPLORER
+ **************************************************************************************************/
+
 function GDM_apiGetRootFolder() {
+
   return GDM_Main.getRootFolder();
 }
 
 
 function GDM_apiGetFolder(folderId) {
+
   return GDM_Main.getFolder(
     folderId
   );
@@ -1900,80 +2227,148 @@ function GDM_apiGetFolderChildren(
   folderId,
   options
 ) {
+
   return GDM_Main.getFolderChildren(
     folderId,
-    options || {}
+    options ||
+    {}
   );
 }
 
+
+/**************************************************************************************************
+ * API ANALYSIS
+ **************************************************************************************************/
 
 function GDM_apiStartAnalysis(options) {
+
   return GDM_Main.startAnalysis(
-    options || {}
+    options ||
+    {}
   );
 }
 
 
+/**************************************************************************************************
+ * API MOVE
+ **************************************************************************************************/
+
 function GDM_apiPreviewMove(options) {
+
   return GDM_Main.previewMove(
-    options || {}
+    options ||
+    {}
   );
 }
 
 
 function GDM_apiStartMove(options) {
+
   return GDM_Main.startMove(
-    options || {}
+    options ||
+    {}
   );
 }
 
+
+/**************************************************************************************************
+ * API COPY
+ **************************************************************************************************/
 
 function GDM_apiStartCopy(options) {
+
   return GDM_Main.startCopy(
-    options || {}
+    options ||
+    {}
   );
 }
 
+
+/**************************************************************************************************
+ * API DUPLICATES
+ **************************************************************************************************/
 
 function GDM_apiStartDuplicates(options) {
+
   return GDM_Main.startDuplicates(
-    options || {}
+    options ||
+    {}
   );
 }
 
+
+/**************************************************************************************************
+ * API ARCHIVE
+ **************************************************************************************************/
 
 function GDM_apiStartArchive(options) {
+
   return GDM_Main.startArchive(
-    options || {}
+    options ||
+    {}
   );
 }
 
 
+/**************************************************************************************************
+ * API RENAME
+ **************************************************************************************************/
+
 function GDM_apiPreviewRename(options) {
+
   return GDM_Main.previewRename(
-    options || {}
+    options ||
+    {}
   );
 }
 
 
 function GDM_apiStartRename(options) {
+
   return GDM_Main.startRename(
-    options || {}
+    options ||
+    {}
   );
 }
 
+
+/**************************************************************************************************
+ * API FOLDER TOOLS
+ **************************************************************************************************/
 
 function GDM_apiFolderTools(
   action,
   options
 ) {
+
   return GDM_Main.folderTools(
     action,
-    options || {}
+    options ||
+    {}
   );
 }
 
 
+/**************************************************************************************************
+ * API DIAGNOSTIC
+ **************************************************************************************************/
+
+function GDM_apiAuthorizeAndTest() {
+
+  return GDM_Main.authorizeAndTest();
+}
+
+
 function GDM_apiDiagnostic() {
+
   return GDM_Main.diagnostic();
+}
+
+
+function GDM_apiCleanup(options) {
+
+  return GDM_Main.cleanup(
+    options ||
+    {}
+  );
 }
