@@ -1,25 +1,34 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Engine.gs
- * Version : 2.0.0
+ * Version : 2.0.1
+ *
+ * CORRECTION 2.0.1
+ * ----------------
+ * - suppression du verrou ScriptLock maintenu pendant toute l'exécution ;
+ * - ajout d'un verrou logique par job ;
+ * - évite les blocages avec Queue.gs / State.gs ;
+ * - meilleure gestion des triggers de reprise ;
+ * - prise en charge de triggerUid ;
+ * - reprise automatique plus robuste ;
+ * - finalisation automatique des résultats des modules.
  *
  * RÔLE
  * ----
- * Moteur central d'exécution de Google Drive Manager PRO V2.
+ * Moteur central des traitements longs de Google Drive Manager PRO V2.
  *
- * Ce fichier gère :
- * - exécution des jobs ;
- * - traitement progressif des queues ;
- * - dispatch des tâches vers les modules métier ;
- * - contrôle du temps d'exécution Apps Script ;
- * - reprise automatique ;
- * - déclencheurs temporels ;
+ * GÈRE
+ * ----
+ * - démarrage ;
+ * - exécution progressive ;
  * - pause ;
+ * - reprise ;
  * - annulation ;
  * - retries ;
- * - checkpoints ;
- * - synchronisation State / Queue / Logger ;
- * - finalisation des jobs ;
+ * - contrôle du temps Apps Script ;
+ * - reprise automatique par trigger ;
+ * - dispatch vers les modules ;
+ * - finalisation ;
  * - récupération après interruption.
  *
  * DÉPENDANCES
@@ -29,38 +38,6 @@
  * Core/Logger.gs
  * Core/State.gs
  * Core/Queue.gs
- *
- * MODULES ATTENDUS
- * ---------------
- * Modules/Explorer.gs
- * Modules/Analysis.gs
- * Modules/Move.gs
- * Modules/Copy.gs
- * Modules/Duplicates.gs
- * Modules/Archive.gs
- * Modules/Rename.gs
- * Modules/FolderTools.gs
- *
- * CONTRAT MODULE
- * --------------
- * Chaque module métier utilisé par Engine.gs doit exposer :
- *
- * GDM_Module.processTask(task, context)
- *
- * Retour conseillé :
- *
- * {
- *   ok: true,
- *   skipped: false,
- *   message: '',
- *   data: {}
- * }
- *
- * IMPORTANT
- * ---------
- * - Engine.gs ne contient pas la logique métier des modules.
- * - Aucun fichier Drive n'est supprimé par ce fichier.
- * - Les traitements longs passent obligatoirement par Queue + State.
  **************************************************************************************************/
 
 'use strict';
@@ -70,62 +47,90 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * DÉMARRAGE D'UN JOB
+   * PRÉFIXE DU VERROU LOGIQUE
+   ************************************************************************************************/
+
+  RUN_LOCK_PREFIX_: 'GDMV2_ENGINE_RUN_',
+
+
+  /************************************************************************************************
+   * DÉMARRER
    ************************************************************************************************/
 
   start: function(jobId, options) {
 
-    options = options || {};
+    options =
+      options ||
+      {};
 
-    jobId = GDM_Utils.requireString(
-      jobId,
-      'jobId'
-    );
 
-    var state = GDM_State.require(
-      jobId
-    );
+    jobId =
+      GDM_Utils.requireString(
+        jobId,
+        'jobId'
+      );
+
+
+    var state =
+      GDM_State.require(
+        jobId
+      );
+
 
     if (
       state.status ===
         GDM_JOB_STATUS.COMPLETED ||
       state.status ===
-        GDM_JOB_STATUS.CANCELLED
+        GDM_JOB_STATUS.CANCELLED ||
+      state.status ===
+        GDM_JOB_STATUS.ERROR
     ) {
+
       throw new Error(
-        'Impossible de démarrer un job déjà terminé ou annulé.'
+        'Impossible de démarrer un job terminé.'
       );
     }
+
 
     GDM_State.setCurrentJobId(
       jobId
     );
 
+
     /*
-     * Si une précédente exécution s'est interrompue alors qu'une tâche
-     * était RUNNING, celle-ci revient en PENDING.
+     * Une exécution Apps Script interrompue peut laisser
+     * une tâche RUNNING. Elle est remise en attente.
      */
     GDM_Queue.resetRunningTasks(
       jobId
     );
 
+
     if (
       state.status ===
       GDM_JOB_STATUS.PAUSED
     ) {
+
       GDM_State.resume(
         jobId,
         'Reprise du traitement.'
       );
+
     } else if (
       state.status !==
       GDM_JOB_STATUS.RUNNING
     ) {
+
       GDM_State.start(
         jobId,
         'Traitement démarré.'
       );
     }
+
+
+    /**********************************************************************************************
+     * MODE ASYNCHRONE
+     **********************************************************************************************/
 
     if (
       GDM_Utils.toBoolean(
@@ -133,26 +138,37 @@ const GDM_Engine = Object.freeze({
         false
       )
     ) {
-      this.scheduleResume(
-        jobId,
-        GDM_Utils.toInteger(
-          options.delayMs,
-          GDM_Config.get(
-            'TRIGGERS.RESUME_DELAY_MS',
-            5000
-          )
-        )
-      );
+
+      var scheduled =
+        this.scheduleResume(
+          jobId,
+          options.delayMs
+        );
+
 
       return {
-        ok: true,
-        jobId: jobId,
-        scheduled: true,
-        state: GDM_State.getSummary(
-          jobId
-        )
+
+        ok:
+          true,
+
+        jobId:
+          jobId,
+
+        scheduled:
+          scheduled.scheduled === true,
+
+        state:
+          GDM_State.getSummary(
+            jobId
+          ),
+
+        queue:
+          GDM_Queue.getMeta(
+            jobId
+          )
       };
     }
+
 
     return this.run(
       jobId,
@@ -163,66 +179,98 @@ const GDM_Engine = Object.freeze({
 
   /************************************************************************************************
    * EXÉCUTION PRINCIPALE
+   *
+   * IMPORTANT :
+   * aucun ScriptLock n'est conservé pendant la boucle.
+   *
+   * Queue.gs et State.gs peuvent ainsi prendre leurs propres locks.
    ************************************************************************************************/
 
   run: function(jobId, options) {
 
-    options = options || {};
+    options =
+      options ||
+      {};
 
-    jobId = GDM_Utils.requireString(
-      jobId,
-      'jobId'
-    );
 
-    var lock =
-      LockService.getScriptLock();
-
-    var lockTimeout =
-      GDM_Utils.toPositiveInteger(
-        GDM_Config.get(
-          'LOCK.ENGINE_LOCK_TIMEOUT_MS',
-          5000
-        ),
-        5000
+    jobId =
+      GDM_Utils.requireString(
+        jobId,
+        'jobId'
       );
 
-    if (
-      !lock.tryLock(
-        lockTimeout
-      )
-    ) {
+
+    var token =
+      this.acquireRunToken_(
+        jobId
+      );
+
+
+    if (!token) {
+
       return {
-        ok: false,
-        jobId: jobId,
-        busy: true,
+
+        ok:
+          false,
+
+        busy:
+          true,
+
+        jobId:
+          jobId,
+
         message:
-          'Le moteur Google Drive Manager PRO est déjà en cours d’exécution.'
+          'Ce job est déjà en cours d’exécution.'
       };
     }
 
+
     try {
+
       return this.runUnlocked_(
         jobId,
-        options
+        options,
+        token
       );
+
+    } catch (error) {
+
+      this.handleRunError_(
+        jobId,
+        error
+      );
+
+
+      throw error;
+
     } finally {
-      try {
-        lock.releaseLock();
-      } catch (ignored) {}
+
+      this.releaseRunToken_(
+        jobId,
+        token
+      );
     }
   },
 
 
   /************************************************************************************************
-   * EXÉCUTION SANS LOCK
+   * BOUCLE D'EXÉCUTION
    ************************************************************************************************/
 
-  runUnlocked_: function(jobId, options) {
+  runUnlocked_: function(
+    jobId,
+    options,
+    token
+  ) {
 
-    options = options || {};
+    options =
+      options ||
+      {};
+
 
     var runtime =
       GDM_Utils.createRuntimeContext();
+
 
     var maxTasks =
       GDM_Utils.toPositiveInteger(
@@ -233,14 +281,6 @@ const GDM_Engine = Object.freeze({
         )
       );
 
-    var checkpointEvery =
-      GDM_Utils.toPositiveInteger(
-        GDM_Config.get(
-          'RUNTIME.STATE_SAVE_EVERY_ITEMS',
-          25
-        ),
-        25
-      );
 
     var cancelCheckEvery =
       GDM_Utils.toPositiveInteger(
@@ -251,26 +291,33 @@ const GDM_Engine = Object.freeze({
         10
       );
 
+
+    var heartbeatEvery =
+      Math.max(
+        5,
+        cancelCheckEvery
+      );
+
+
     var state =
       GDM_State.require(
         jobId
       );
 
-    if (
-      state.status ===
-      GDM_JOB_STATUS.CANCELLED
-    ) {
-      return this.buildRunResult_(
-        jobId,
-        0,
-        'Job déjà annulé.'
-      );
-    }
+
+    /**********************************************************************************************
+     * JOB TERMINAL
+     **********************************************************************************************/
 
     if (
       state.status ===
-      GDM_JOB_STATUS.COMPLETED
+        GDM_JOB_STATUS.COMPLETED ||
+      state.status ===
+        GDM_JOB_STATUS.CANCELLED ||
+      state.status ===
+        GDM_JOB_STATUS.ERROR
     ) {
+
       return this.buildRunResult_(
         jobId,
         0,
@@ -278,11 +325,17 @@ const GDM_Engine = Object.freeze({
       );
     }
 
+
+    /**********************************************************************************************
+     * PAUSE
+     **********************************************************************************************/
+
     if (
       state.pauseRequested === true ||
       state.status ===
         GDM_JOB_STATUS.PAUSED
     ) {
+
       return this.buildRunResult_(
         jobId,
         0,
@@ -290,47 +343,63 @@ const GDM_Engine = Object.freeze({
       );
     }
 
+
     GDM_State.setCurrentJobId(
       jobId
     );
+
 
     if (
       state.status !==
       GDM_JOB_STATUS.RUNNING
     ) {
+
       GDM_State.start(
         jobId,
         'Traitement en cours.'
       );
     }
 
-    /*
-     * Nettoyage des triggers de reprise déjà consommés.
-     */
-    this.cleanupOwnTriggers_();
 
     var processedThisRun = 0;
-    var terminalThisRun = 0;
+
+    var successThisRun = 0;
+
+    var skippedThisRun = 0;
+
+    var errorsThisRun = 0;
+
     var retriesThisRun = 0;
 
+
+    /**********************************************************************************************
+     * BOUCLE
+     **********************************************************************************************/
+
     while (
-      processedThisRun < maxTasks
+      processedThisRun <
+      maxTasks
     ) {
 
-      /*
-       * Arrêt avant la limite Apps Script.
-       */
+
+      /********************************************************************************************
+       * LIMITE TEMPS APPS SCRIPT
+       ********************************************************************************************/
+
       if (
         GDM_Utils.runtimeExpired(
           runtime
         )
       ) {
+
         break;
       }
 
-      /*
-       * Vérification périodique pause / annulation.
-       */
+
+      /********************************************************************************************
+       * PAUSE / ANNULATION
+       ********************************************************************************************/
+
       if (
         processedThisRun === 0 ||
         processedThisRun %
@@ -338,21 +407,27 @@ const GDM_Engine = Object.freeze({
           0
       ) {
 
-        var freshState =
+        var controlState =
           GDM_State.get(
             jobId
           );
 
-        if (!freshState) {
+
+        if (!controlState) {
+
           throw new Error(
-            'État du job introuvable pendant l’exécution.'
+            'État du job introuvable.'
           );
         }
 
+
+        /******************************************************************************************
+         * ANNULATION
+         ******************************************************************************************/
+
         if (
-          freshState.cancelRequested ===
-            true ||
-          freshState.status ===
+          controlState.cancelRequested === true ||
+          controlState.status ===
             GDM_JOB_STATUS.CANCELLED
         ) {
 
@@ -361,15 +436,23 @@ const GDM_Engine = Object.freeze({
             'Job annulé.'
           );
 
+
           if (
-            freshState.status !==
+            controlState.status !==
             GDM_JOB_STATUS.CANCELLED
           ) {
+
             GDM_State.cancel(
               jobId,
               'Traitement annulé.'
             );
           }
+
+
+          this.removeResumeTriggers(
+            jobId
+          );
+
 
           return this.buildRunResult_(
             jobId,
@@ -378,22 +461,33 @@ const GDM_Engine = Object.freeze({
           );
         }
 
+
+        /******************************************************************************************
+         * PAUSE
+         ******************************************************************************************/
+
         if (
-          freshState.pauseRequested ===
-            true ||
-          freshState.status ===
+          controlState.pauseRequested === true ||
+          controlState.status ===
             GDM_JOB_STATUS.PAUSED
         ) {
 
           if (
-            freshState.status !==
+            controlState.status !==
             GDM_JOB_STATUS.PAUSED
           ) {
+
             GDM_State.pause(
               jobId,
               'Traitement mis en pause.'
             );
           }
+
+
+          this.removeResumeTriggers(
+            jobId
+          );
+
 
           return this.buildRunResult_(
             jobId,
@@ -403,44 +497,87 @@ const GDM_Engine = Object.freeze({
         }
       }
 
-      /*
-       * Prend la prochaine tâche PENDING et la passe RUNNING.
-       */
+
+      /********************************************************************************************
+       * HEARTBEAT VERROU LOGIQUE
+       ********************************************************************************************/
+
+      if (
+        processedThisRun === 0 ||
+        processedThisRun %
+          heartbeatEvery ===
+          0
+      ) {
+
+        this.refreshRunToken_(
+          jobId,
+          token
+        );
+      }
+
+
+      /********************************************************************************************
+       * PROCHAINE TÂCHE
+       ********************************************************************************************/
+
       var task =
         GDM_Queue.claimNext(
           jobId
         );
 
+
       if (!task) {
+
         break;
       }
 
+
       processedThisRun++;
 
-      GDM_State.setCurrentItem(
-        jobId,
-        {
-          id:
-            task.itemId,
 
-          name:
-            task.itemName,
+      /*
+       * Mise à jour informative pour l'interface.
+       */
+      try {
 
-          taskId:
-            task.taskId
-        }
-      );
+        GDM_State.setCurrentItem(
+          jobId,
+          {
 
-      var executionResult;
+            id:
+              task.itemId ||
+              '',
+
+            name:
+              task.itemName ||
+              '',
+
+            taskId:
+              task.taskId ||
+              ''
+          }
+        );
+
+      } catch (ignoredCurrentItem) {}
+
+
+      /********************************************************************************************
+       * EXÉCUTION TÂCHE
+       ********************************************************************************************/
 
       try {
 
-        executionResult =
+        var moduleResult =
           this.executeTask_(
             task,
             {
-              jobId: jobId,
-              runtime: runtime,
+
+              jobId:
+                jobId,
+
+              runtime:
+                runtime,
+
               state:
                 GDM_State.get(
                   jobId
@@ -448,37 +585,68 @@ const GDM_Engine = Object.freeze({
             }
           );
 
-        executionResult =
+
+        moduleResult =
           this.normalizeModuleResult_(
-            executionResult
+            moduleResult
           );
 
+
+        /******************************************************************************************
+         * MODULE RETOURNE ERREUR
+         ******************************************************************************************/
+
         if (
-          executionResult.skipped ===
+          moduleResult.ok ===
+          false
+        ) {
+
+          throw new Error(
+            moduleResult.message ||
+            'Le module a retourné une erreur.'
+          );
+        }
+
+
+        /******************************************************************************************
+         * SKIPPED
+         ******************************************************************************************/
+
+        if (
+          moduleResult.skipped ===
           true
         ) {
 
           GDM_Queue.skipTask(
             jobId,
             task.taskId,
-            executionResult.message ||
-              'Élément ignoré.'
+            moduleResult.message ||
+            'Élément ignoré.'
           );
+
 
           GDM_State.increment(
             jobId,
             {
-              processed: 1,
-              skipped: 1
+
+              processed:
+                1,
+
+              skipped:
+                1
             }
           );
 
-          terminalThisRun++;
+
+          skippedThisRun++;
+
 
           try {
+
             GDM_Logger.itemSkipped(
               jobId,
               {
+
                 taskId:
                   task.taskId,
 
@@ -495,80 +663,60 @@ const GDM_Engine = Object.freeze({
                   task.itemName,
 
                 message:
-                  executionResult.message ||
+                  moduleResult.message ||
                   'Élément ignoré.'
               }
             );
+
           } catch (ignoredSkipLog) {}
 
-        } else if (
-          executionResult.ok ===
-          false
-        ) {
 
-          throw new Error(
-            executionResult.message ||
-            'Le module a retourné une erreur.'
-          );
-
-        } else {
-
-          GDM_Queue.completeTask(
-            jobId,
-            task.taskId,
-            executionResult
-          );
-
-          GDM_State.increment(
-            jobId,
-            {
-              processed: 1,
-              success: 1
-            }
-          );
-
-          terminalThisRun++;
-
-          try {
-            GDM_Logger.itemProcessed(
-              jobId,
-              {
-                taskId:
-                  task.taskId,
-
-                module:
-                  task.module,
-
-                action:
-                  task.action,
-
-                itemId:
-                  task.itemId,
-
-                itemName:
-                  task.itemName,
-
-                message:
-                  executionResult.message ||
-                  'Élément traité.'
-              }
-            );
-          } catch (ignoredSuccessLog) {}
+          continue;
         }
 
-      } catch (error) {
+
+        /******************************************************************************************
+         * SUCCÈS
+         ******************************************************************************************/
+
+        GDM_Queue.completeTask(
+          jobId,
+          task.taskId,
+          moduleResult
+        );
+
+
+        GDM_State.increment(
+          jobId,
+          {
+
+            processed:
+              1,
+
+            success:
+              1
+          }
+        );
+
+
+        successThisRun++;
+
+
+      } catch (taskError) {
+
+
+        /******************************************************************************************
+         * RETRY / ERREUR TERMINALE
+         ******************************************************************************************/
 
         var failedTask =
           GDM_Queue.failTask(
             jobId,
             task.taskId,
-            error
+            taskError
           );
 
-        /*
-         * Si la tâche revient en PENDING, ce n'est pas encore
-         * une erreur terminale du job.
-         */
+
         if (
           failedTask &&
           failedTask.status ===
@@ -577,10 +725,13 @@ const GDM_Engine = Object.freeze({
 
           retriesThisRun++;
 
+
           try {
+
             GDM_Logger.warn(
               'Nouvelle tentative planifiée.',
               {
+
                 jobId:
                   jobId,
 
@@ -600,61 +751,47 @@ const GDM_Engine = Object.freeze({
                   task.itemName,
 
                 data: {
-                  attempt:
+
+                  attempts:
                     failedTask.attempts
                 }
               }
             );
+
           } catch (ignoredRetryLog) {}
 
-        } else {
 
-          terminalThisRun++;
+          continue;
+        }
 
-          GDM_State.increment(
+
+        /******************************************************************************************
+         * ERREUR DÉFINITIVE
+         ******************************************************************************************/
+
+        GDM_State.increment(
+          jobId,
+          {
+
+            processed:
+              1,
+
+            errors:
+              1
+          }
+        );
+
+
+        errorsThisRun++;
+
+
+        try {
+
+          GDM_State.setLastError(
             jobId,
-            {
-              processed: 1,
-              errors: 1
-            }
-          );
-
-          GDM_State.update(
-            jobId,
-            {
-              lastError:
-                GDM_Utils.errorToObject(
-                  error,
-                  {
-                    jobId:
-                      jobId,
-
-                    taskId:
-                      task.taskId,
-
-                    module:
-                      task.module,
-
-                    action:
-                      task.action,
-
-                    itemId:
-                      task.itemId,
-
-                    itemName:
-                      task.itemName
-                  }
-                )
-            }
-          );
-
-          try {
-            GDM_Logger.itemError(
-              jobId,
-              error,
+            GDM_Utils.errorToObject(
+              taskError,
               {
-                taskId:
-                  task.taskId,
 
                 module:
                   task.module,
@@ -668,90 +805,91 @@ const GDM_Engine = Object.freeze({
                 itemName:
                   task.itemName
               }
-            );
-          } catch (ignoredErrorLog) {}
-        }
-      }
-
-      /*
-       * Checkpoint périodique.
-       */
-      if (
-        terminalThisRun > 0 &&
-        terminalThisRun %
-          checkpointEvery ===
-          0
-      ) {
-
-        var checkpointState =
-          GDM_State.get(
-            jobId
+            )
           );
 
-        if (checkpointState) {
-          GDM_State.checkpoint(
+        } catch (ignoredStateError) {}
+
+
+        try {
+
+          GDM_Logger.itemError(
             jobId,
+            taskError,
             {
-              processed:
-                checkpointState.processed,
 
-              totalKnown:
-                checkpointState.totalKnown,
+              taskId:
+                task.taskId,
 
-              success:
-                checkpointState.success,
+              module:
+                task.module,
 
-              skipped:
-                checkpointState.skipped,
+              action:
+                task.action,
 
-              errors:
-                checkpointState.errors,
+              itemId:
+                task.itemId,
 
-              currentItem:
-                checkpointState.currentItem,
-
-              currentItemId:
-                checkpointState.currentItemId,
-
-              currentTaskId:
-                checkpointState.currentTaskId,
-
-              message:
-                'Traitement en cours.'
+              itemName:
+                task.itemName
             }
           );
-        }
+
+        } catch (ignoredLoggerError) {}
       }
     }
 
-    /*
-     * Vérification de la queue après le lot.
-     */
-    var meta =
-      GDM_Queue.getMeta(
-        jobId
-      );
+
+    /**********************************************************************************************
+     * LA QUEUE EST TERMINÉE
+     **********************************************************************************************/
 
     if (
-      !meta ||
-      meta.done === true
+      GDM_Queue.isDone(
+        jobId
+      )
     ) {
+
       return this.finalizeJob_(
         jobId,
-        processedThisRun
+        {
+
+          processedThisRun:
+            processedThisRun,
+
+          successThisRun:
+            successThisRun,
+
+          skippedThisRun:
+            skippedThisRun,
+
+          errorsThisRun:
+            errorsThisRun,
+
+          retriesThisRun:
+            retriesThisRun
+        }
       );
     }
 
-    /*
-     * Si des tâches restent, le job est conservé pour reprise.
-     */
+
+    /**********************************************************************************************
+     * IL RESTE DU TRAVAIL
+     **********************************************************************************************/
+
     GDM_State.checkpoint(
       jobId,
       {
+
         message:
-          'Lot terminé. Reprise nécessaire.'
+          'Lot terminé. Reprise automatique en attente.'
       }
     );
+
+
+    var scheduled =
+      false;
+
 
     if (
       GDM_Config.get(
@@ -763,17 +901,27 @@ const GDM_Engine = Object.freeze({
         true
       )
     ) {
-      this.scheduleResume(
-        jobId,
-        GDM_Config.get(
-          'QUEUE.AUTO_RESUME_DELAY_MS',
-          5000
-        )
-      );
+
+      var scheduleResult =
+        this.scheduleResume(
+          jobId,
+          GDM_Config.get(
+            'QUEUE.AUTO_RESUME_DELAY_MS',
+            5000
+          )
+        );
+
+
+      scheduled =
+        scheduleResult.scheduled ===
+        true;
     }
 
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
@@ -784,25 +932,20 @@ const GDM_Engine = Object.freeze({
       processedThisRun:
         processedThisRun,
 
-      terminalThisRun:
-        terminalThisRun,
+      successThisRun:
+        successThisRun,
+
+      skippedThisRun:
+        skippedThisRun,
+
+      errorsThisRun:
+        errorsThisRun,
 
       retriesThisRun:
         retriesThisRun,
 
-      remaining:
-        Number(
-          meta.pending || 0
-        ) +
-        Number(
-          meta.running || 0
-        ),
-
       scheduled:
-        GDM_Config.get(
-          'QUEUE.AUTO_RESUME',
-          true
-        ),
+        scheduled,
 
       state:
         GDM_State.getSummary(
@@ -810,13 +953,15 @@ const GDM_Engine = Object.freeze({
         ),
 
       queue:
-        meta
+        GDM_Queue.getMeta(
+          jobId
+        )
     };
   },
 
 
   /************************************************************************************************
-   * EXÉCUTION D'UNE TÂCHE
+   * DISPATCH MODULE
    ************************************************************************************************/
 
   executeTask_: function(
@@ -825,33 +970,30 @@ const GDM_Engine = Object.freeze({
   ) {
 
     if (!task) {
+
       throw new Error(
         'Engine : tâche vide.'
       );
     }
 
-    context =
-      context || {};
-
-    context.task =
-      task;
 
     switch (
       task.module
     ) {
 
+
       case GDM_MODULES.EXPLORER:
 
         if (
-          typeof GDM_Explorer ===
-            'undefined' ||
-          typeof GDM_Explorer.processTask !==
-            'function'
+          typeof GDM_Explorer === 'undefined' ||
+          typeof GDM_Explorer.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Explorer non disponible ou processTask() absent.'
+            'Module Explorer indisponible.'
           );
         }
+
 
         return GDM_Explorer.processTask(
           task,
@@ -862,15 +1004,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.ANALYSIS:
 
         if (
-          typeof GDM_Analysis ===
-            'undefined' ||
-          typeof GDM_Analysis.processTask !==
-            'function'
+          typeof GDM_Analysis === 'undefined' ||
+          typeof GDM_Analysis.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Analysis non disponible ou processTask() absent.'
+            'Module Analysis indisponible.'
           );
         }
+
 
         return GDM_Analysis.processTask(
           task,
@@ -881,15 +1023,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.MOVE:
 
         if (
-          typeof GDM_Move ===
-            'undefined' ||
-          typeof GDM_Move.processTask !==
-            'function'
+          typeof GDM_Move === 'undefined' ||
+          typeof GDM_Move.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Move non disponible ou processTask() absent.'
+            'Module Move indisponible.'
           );
         }
+
 
         return GDM_Move.processTask(
           task,
@@ -900,15 +1042,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.COPY:
 
         if (
-          typeof GDM_Copy ===
-            'undefined' ||
-          typeof GDM_Copy.processTask !==
-            'function'
+          typeof GDM_Copy === 'undefined' ||
+          typeof GDM_Copy.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Copy non disponible ou processTask() absent.'
+            'Module Copy indisponible.'
           );
         }
+
 
         return GDM_Copy.processTask(
           task,
@@ -919,15 +1061,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.DUPLICATES:
 
         if (
-          typeof GDM_Duplicates ===
-            'undefined' ||
-          typeof GDM_Duplicates.processTask !==
-            'function'
+          typeof GDM_Duplicates === 'undefined' ||
+          typeof GDM_Duplicates.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Duplicates non disponible ou processTask() absent.'
+            'Module Duplicates indisponible.'
           );
         }
+
 
         return GDM_Duplicates.processTask(
           task,
@@ -938,15 +1080,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.ARCHIVE:
 
         if (
-          typeof GDM_Archive ===
-            'undefined' ||
-          typeof GDM_Archive.processTask !==
-            'function'
+          typeof GDM_Archive === 'undefined' ||
+          typeof GDM_Archive.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Archive non disponible ou processTask() absent.'
+            'Module Archive indisponible.'
           );
         }
+
 
         return GDM_Archive.processTask(
           task,
@@ -957,15 +1099,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.RENAME:
 
         if (
-          typeof GDM_Rename ===
-            'undefined' ||
-          typeof GDM_Rename.processTask !==
-            'function'
+          typeof GDM_Rename === 'undefined' ||
+          typeof GDM_Rename.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module Rename non disponible ou processTask() absent.'
+            'Module Rename indisponible.'
           );
         }
+
 
         return GDM_Rename.processTask(
           task,
@@ -976,15 +1118,15 @@ const GDM_Engine = Object.freeze({
       case GDM_MODULES.FOLDER_TOOLS:
 
         if (
-          typeof GDM_FolderTools ===
-            'undefined' ||
-          typeof GDM_FolderTools.processTask !==
-            'function'
+          typeof GDM_FolderTools === 'undefined' ||
+          typeof GDM_FolderTools.processTask !== 'function'
         ) {
+
           throw new Error(
-            'Module FolderTools non disponible ou processTask() absent.'
+            'Module FolderTools indisponible.'
           );
         }
+
 
         return GDM_FolderTools.processTask(
           task,
@@ -995,7 +1137,7 @@ const GDM_Engine = Object.freeze({
       default:
 
         throw new Error(
-          'Engine : module inconnu : ' +
+          'Module inconnu : ' +
           GDM_Utils.toString(
             task.module
           )
@@ -1005,54 +1147,82 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * NORMALISATION DU RETOUR MODULE
+   * NORMALISER RÉSULTAT MODULE
    ************************************************************************************************/
 
-  normalizeModuleResult_: function(
-    result
-  ) {
+  normalizeModuleResult_: function(result) {
 
     if (
       result === null ||
       typeof result ===
         'undefined'
     ) {
+
       return {
-        ok: true,
-        skipped: false,
-        message: '',
-        data: {}
+
+        ok:
+          true,
+
+        skipped:
+          false,
+
+        message:
+          '',
+
+        data:
+          {}
       };
     }
+
 
     if (
       typeof result ===
       'boolean'
     ) {
+
       return {
-        ok: result,
-        skipped: false,
-        message: '',
-        data: {}
+
+        ok:
+          result,
+
+        skipped:
+          false,
+
+        message:
+          '',
+
+        data:
+          {}
       };
     }
+
 
     if (
       typeof result !==
       'object'
     ) {
+
       return {
-        ok: true,
-        skipped: false,
+
+        ok:
+          true,
+
+        skipped:
+          false,
+
         message:
           GDM_Utils.toString(
             result
           ),
-        data: {}
+
+        data:
+          {}
       };
     }
 
+
     return {
+
       ok:
         typeof result.ok ===
           'boolean'
@@ -1060,7 +1230,8 @@ const GDM_Engine = Object.freeze({
           : true,
 
       skipped:
-        result.skipped === true,
+        result.skipped ===
+        true,
 
       message:
         GDM_Utils.toString(
@@ -1071,117 +1242,157 @@ const GDM_Engine = Object.freeze({
         typeof result.data ===
           'undefined'
           ? {}
-          : result.data,
-
-      result:
-        typeof result.result ===
-          'undefined'
-          ? null
-          : result.result
+          : result.data
     };
   },
 
 
   /************************************************************************************************
-   * FINALISATION
+   * FINALISER JOB
    ************************************************************************************************/
 
   finalizeJob_: function(
     jobId,
-    processedThisRun
+    runStats
   ) {
+
+    runStats =
+      runStats ||
+      {};
+
+
+    var state =
+      GDM_State.require(
+        jobId
+      );
+
+
+    /**********************************************************************************************
+     * FINALISATION SPÉCIFIQUE AU MODULE
+     **********************************************************************************************/
+
+    var moduleResult =
+      this.finalizeModuleResult_(
+        state.module,
+        jobId
+      );
+
 
     var queue =
       GDM_Queue.getMeta(
         jobId
       );
 
-    var currentState =
-      GDM_State.require(
-        jobId
-      );
 
-    /*
-     * Un job peut être techniquement terminé tout en ayant des erreurs
-     * sur certains fichiers. On conserve COMPLETED : les compteurs
-     * indiquent clairement le nombre d'erreurs.
-     */
-    var result = {
+    var standardResult = {
+
       ok:
         Number(
-          currentState.errors || 0
+          state.errors || 0
         ) === 0,
 
       module:
-        currentState.module,
+        state.module,
 
       action:
-        currentState.action,
+        state.action,
 
       jobId:
         jobId,
 
       processed:
         Number(
-          currentState.processed || 0
+          state.processed || 0
         ),
 
       success:
         Number(
-          currentState.success || 0
+          state.success || 0
         ),
 
       skipped:
         Number(
-          currentState.skipped || 0
+          state.skipped || 0
         ),
 
       errors:
         Number(
-          currentState.errors || 0
+          state.errors || 0
         ),
 
       message:
         Number(
-          currentState.errors || 0
+          state.errors || 0
         ) > 0
           ? 'Traitement terminé avec erreur(s).'
           : 'Traitement terminé avec succès.',
 
       data: {
+
         queue:
-          queue
+          queue,
+
+        moduleResult:
+          moduleResult
       }
     };
 
+
     GDM_State.saveResult(
       jobId,
-      result
+      standardResult
     );
+
 
     GDM_State.complete(
       jobId,
-      result.message
+      standardResult.message
     );
 
+
+    this.removeResumeTriggers(
+      jobId
+    );
+
+
     try {
-      GDM_Logger.queueCompleted(
+
+      GDM_Logger.jobCompleted(
         jobId,
         {
+
           module:
-            currentState.module,
+            state.module,
 
           action:
-            currentState.action,
+            state.action,
 
           message:
-            'Queue terminée.',
+            standardResult.message,
 
-          data:
-            queue
+          data: {
+
+            processed:
+              standardResult.processed,
+
+            success:
+              standardResult.success,
+
+            skipped:
+              standardResult.skipped,
+
+            errors:
+              standardResult.errors
+          }
         }
       );
-    } catch (ignored) {}
+
+    } catch (ignoredLog) {}
+
+
+    /**********************************************************************************************
+     * COMPACTER QUEUE
+     **********************************************************************************************/
 
     if (
       GDM_Config.get(
@@ -1189,17 +1400,21 @@ const GDM_Engine = Object.freeze({
         false
       ) === false
     ) {
+
       try {
+
         GDM_Queue.compact(
           jobId
         );
+
       } catch (ignoredCompact) {}
     }
 
-    this.removeResumeTriggers();
 
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
@@ -1208,7 +1423,34 @@ const GDM_Engine = Object.freeze({
         true,
 
       processedThisRun:
-        processedThisRun,
+        Number(
+          runStats.processedThisRun ||
+          0
+        ),
+
+      successThisRun:
+        Number(
+          runStats.successThisRun ||
+          0
+        ),
+
+      skippedThisRun:
+        Number(
+          runStats.skippedThisRun ||
+          0
+        ),
+
+      errorsThisRun:
+        Number(
+          runStats.errorsThisRun ||
+          0
+        ),
+
+      retriesThisRun:
+        Number(
+          runStats.retriesThisRun ||
+          0
+        ),
 
       state:
         GDM_State.getSummary(
@@ -1216,8 +1458,131 @@ const GDM_Engine = Object.freeze({
         ),
 
       result:
-        result
+        standardResult
     };
+  },
+
+
+  /************************************************************************************************
+   * FINALISATION SPÉCIFIQUE MODULE
+   ************************************************************************************************/
+
+  finalizeModuleResult_: function(
+    moduleName,
+    jobId
+  ) {
+
+    try {
+
+      switch (
+        moduleName
+      ) {
+
+
+        case GDM_MODULES.ANALYSIS:
+
+          if (
+            typeof GDM_Analysis !== 'undefined' &&
+            typeof GDM_Analysis.finalizeResult === 'function'
+          ) {
+
+            return GDM_Analysis.finalizeResult(
+              jobId
+            );
+          }
+
+          break;
+
+
+        case GDM_MODULES.COPY:
+
+          if (
+            typeof GDM_Copy !== 'undefined' &&
+            typeof GDM_Copy.finalizeResult === 'function'
+          ) {
+
+            return GDM_Copy.finalizeResult(
+              jobId
+            );
+          }
+
+          break;
+
+
+        case GDM_MODULES.DUPLICATES:
+
+          if (
+            typeof GDM_Duplicates !== 'undefined' &&
+            typeof GDM_Duplicates.finalizeResult === 'function'
+          ) {
+
+            return GDM_Duplicates.finalizeResult(
+              jobId
+            );
+          }
+
+          break;
+
+
+        case GDM_MODULES.ARCHIVE:
+
+          if (
+            typeof GDM_Archive !== 'undefined' &&
+            typeof GDM_Archive.finalizeResult === 'function'
+          ) {
+
+            return GDM_Archive.finalizeResult(
+              jobId
+            );
+          }
+
+          break;
+
+
+        case GDM_MODULES.RENAME:
+
+          if (
+            typeof GDM_Rename !== 'undefined' &&
+            typeof GDM_Rename.finalizeResult === 'function'
+          ) {
+
+            return GDM_Rename.finalizeResult(
+              jobId
+            );
+          }
+
+          break;
+      }
+
+    } catch (error) {
+
+      try {
+
+        GDM_Logger.warn(
+          'Impossible de finaliser le résultat spécifique du module.',
+          {
+
+            jobId:
+              jobId,
+
+            module:
+              moduleName,
+
+            data: {
+
+              error:
+                GDM_Utils.getErrorMessage(
+                  error
+                )
+            }
+          }
+        );
+
+      } catch (ignored) {}
+    }
+
+
+    return null;
   },
 
 
@@ -1231,31 +1596,42 @@ const GDM_Engine = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     jobId =
       GDM_Utils.requireString(
         jobId,
         'jobId'
       );
 
+
     var state =
       GDM_State.require(
         jobId
       );
 
+
     if (
       state.status ===
         GDM_JOB_STATUS.COMPLETED ||
       state.status ===
-        GDM_JOB_STATUS.CANCELLED
+        GDM_JOB_STATUS.CANCELLED ||
+      state.status ===
+        GDM_JOB_STATUS.ERROR
     ) {
+
       return state;
     }
+
 
     GDM_State.requestPause(
       jobId
     );
 
-    this.removeResumeTriggers();
+
+    this.removeResumeTriggers(
+      jobId
+    );
+
 
     return GDM_State.get(
       jobId
@@ -1269,11 +1645,15 @@ const GDM_Engine = Object.freeze({
 
   resume: function(jobId, options) {
 
-    options = options || {};
+    options =
+      options ||
+      {};
+
 
     jobId =
       jobId ||
       GDM_State.getCurrentJobId();
+
 
     jobId =
       GDM_Utils.requireString(
@@ -1281,29 +1661,41 @@ const GDM_Engine = Object.freeze({
         'jobId'
       );
 
+
     var state =
       GDM_State.require(
         jobId
       );
 
+
     if (
       state.status ===
         GDM_JOB_STATUS.COMPLETED ||
       state.status ===
-        GDM_JOB_STATUS.CANCELLED
+        GDM_JOB_STATUS.CANCELLED ||
+      state.status ===
+        GDM_JOB_STATUS.ERROR
     ) {
+
       throw new Error(
         'Ce job ne peut plus être repris.'
       );
     }
 
+
     GDM_Queue.resetRunningTasks(
       jobId
     );
 
-    GDM_State.setCurrentJobId(
-      jobId
-    );
+
+    try {
+
+      GDM_State.clearPauseRequest(
+        jobId
+      );
+
+    } catch (ignoredClearPause) {}
+
 
     if (
       state.status ===
@@ -1311,11 +1703,18 @@ const GDM_Engine = Object.freeze({
       state.pauseRequested ===
         true
     ) {
+
       GDM_State.resume(
         jobId,
         'Reprise du traitement.'
       );
     }
+
+
+    GDM_State.setCurrentJobId(
+      jobId
+    );
+
 
     if (
       GDM_Utils.toBoolean(
@@ -1323,16 +1722,13 @@ const GDM_Engine = Object.freeze({
         false
       )
     ) {
-      this.scheduleResume(
-        jobId
-      );
 
-      return {
-        ok: true,
-        jobId: jobId,
-        scheduled: true
-      };
+      return this.scheduleResume(
+        jobId,
+        options.delayMs
+      );
     }
+
 
     return this.run(
       jobId,
@@ -1351,34 +1747,44 @@ const GDM_Engine = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     jobId =
       GDM_Utils.requireString(
         jobId,
         'jobId'
       );
 
+
     var state =
       GDM_State.require(
         jobId
       );
 
+
     if (
       state.status ===
       GDM_JOB_STATUS.COMPLETED
     ) {
+
       return state;
     }
+
 
     GDM_State.requestCancel(
       jobId
     );
+
 
     GDM_Queue.cancelPending(
       jobId,
       'Job annulé par l’utilisateur.'
     );
 
-    this.removeResumeTriggers();
+
+    this.removeResumeTriggers(
+      jobId
+    );
+
 
     return GDM_State.cancel(
       jobId,
@@ -1388,7 +1794,7 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * EXÉCUTION D'UN SEUL LOT MANUEL
+   * UN LOT MANUEL
    ************************************************************************************************/
 
   runOneBatch: function(jobId) {
@@ -1397,9 +1803,11 @@ const GDM_Engine = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     return this.run(
       jobId,
       {
+
         maxTasks:
           GDM_Config.get(
             'QUEUE.MAX_ITEMS_PER_BATCH',
@@ -1411,7 +1819,7 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * TRIGGER DE REPRISE
+   * PLANIFIER UNE REPRISE
    ************************************************************************************************/
 
   scheduleResume: function(
@@ -1425,24 +1833,33 @@ const GDM_Engine = Object.freeze({
         'jobId'
       );
 
+
     if (
       !GDM_Config.get(
         'TRIGGERS.ENABLED',
         true
       )
     ) {
+
       return {
-        ok: false,
-        scheduled: false,
+
+        ok:
+          false,
+
+        scheduled:
+          false,
+
         reason:
           'Déclencheurs désactivés.'
       };
     }
 
+
     var state =
       GDM_State.require(
         jobId
       );
+
 
     if (
       state.status ===
@@ -1450,19 +1867,24 @@ const GDM_Engine = Object.freeze({
       state.status ===
         GDM_JOB_STATUS.CANCELLED ||
       state.status ===
-        GDM_JOB_STATUS.ERROR
+        GDM_JOB_STATUS.ERROR ||
+      state.pauseRequested ===
+        true
     ) {
+
       return {
-        ok: false,
-        scheduled: false,
+
+        ok:
+          false,
+
+        scheduled:
+          false,
+
         reason:
-          'Job terminé.'
+          'Le job ne nécessite pas de reprise.'
       };
     }
 
-    GDM_State.setCurrentJobId(
-      jobId
-    );
 
     delayMs =
       Math.max(
@@ -1476,14 +1898,17 @@ const GDM_Engine = Object.freeze({
         )
       );
 
-    if (
-      GDM_Config.get(
-        'TRIGGERS.DELETE_OLD_TRIGGER_BEFORE_CREATE',
-        true
-      )
-    ) {
-      this.removeResumeTriggers();
-    }
+
+    /*
+     * Évite de créer plusieurs triggers pour le même job.
+     */
+    this.removeResumeTriggers(
+      jobId
+    );
+
+
+    this.cleanupOwnTriggers_();
+
 
     var maxTriggers =
       GDM_Utils.toPositiveInteger(
@@ -1494,33 +1919,28 @@ const GDM_Engine = Object.freeze({
         15
       );
 
-    var existing =
+
+    var projectTriggers =
       ScriptApp.getProjectTriggers();
 
+
     if (
-      existing.length >=
+      projectTriggers.length >=
       maxTriggers
     ) {
-      this.cleanupOwnTriggers_();
 
-      existing =
-        ScriptApp.getProjectTriggers();
-
-      if (
-        existing.length >=
-        maxTriggers
-      ) {
-        throw new Error(
-          'Nombre maximum de déclencheurs Apps Script atteint.'
-        );
-      }
+      throw new Error(
+        'Nombre maximum de déclencheurs Apps Script atteint.'
+      );
     }
+
 
     var handler =
       GDM_Config.get(
         'TRIGGERS.HANDLER_FUNCTION',
         'GDM_engineTrigger'
       );
+
 
     var trigger =
       ScriptApp
@@ -1533,43 +1953,58 @@ const GDM_Engine = Object.freeze({
         )
         .create();
 
+
     var triggerId = '';
 
+
     try {
+
       triggerId =
         trigger.getUniqueId();
+
     } catch (ignoredId) {}
 
-    var propertyKey =
-      GDM_Config.get(
-        'STORAGE_KEYS.TRIGGER_PREFIX',
-        'GDMV2_TRIGGER_'
-      ) +
-      jobId;
 
-    PropertiesService
-      .getScriptProperties()
-      .setProperty(
-        propertyKey,
-        JSON.stringify({
-          jobId:
-            jobId,
+    if (
+      triggerId
+    ) {
 
-          triggerId:
-            triggerId,
+      PropertiesService
+        .getScriptProperties()
+        .setProperty(
+          this.getTriggerPropertyKey_(
+            triggerId
+          ),
+          JSON.stringify({
 
-          createdAt:
-            GDM_Utils.nowIso(),
+            jobId:
+              jobId,
 
-          delayMs:
-            delayMs
-        })
-      );
+            triggerId:
+              triggerId,
+
+            createdAt:
+              GDM_Utils.nowIso(),
+
+            delayMs:
+              delayMs
+          })
+        );
+    }
+
+
+    GDM_State.setCurrentJobId(
+      jobId
+    );
+
 
     return {
-      ok: true,
 
-      scheduled: true,
+      ok:
+        true,
+
+      scheduled:
+        true,
 
       jobId:
         jobId,
@@ -1584,10 +2019,173 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * SUPPRESSION DES TRIGGERS DE REPRISE
+   * HANDLER TRIGGER
    ************************************************************************************************/
 
-  removeResumeTriggers: function() {
+  triggerRun: function(event) {
+
+    event =
+      event ||
+      {};
+
+
+    var triggerUid =
+      GDM_Utils.trim(
+        event.triggerUid
+      );
+
+
+    var jobId = '';
+
+
+    /**********************************************************************************************
+     * RÉCUPÉRATION PAR triggerUid
+     **********************************************************************************************/
+
+    if (
+      triggerUid
+    ) {
+
+      var raw =
+        PropertiesService
+          .getScriptProperties()
+          .getProperty(
+            this.getTriggerPropertyKey_(
+              triggerUid
+            )
+          );
+
+
+      if (raw) {
+
+        var triggerData =
+          GDM_Utils.safeJsonParse(
+            raw,
+            {}
+          );
+
+
+        jobId =
+          GDM_Utils.trim(
+            triggerData.jobId
+          );
+      }
+
+
+      /*
+       * Le trigger vient d'être consommé.
+       */
+      PropertiesService
+        .getScriptProperties()
+        .deleteProperty(
+          this.getTriggerPropertyKey_(
+            triggerUid
+          )
+        );
+    }
+
+
+    /**********************************************************************************************
+     * FALLBACK
+     **********************************************************************************************/
+
+    if (!jobId) {
+
+      jobId =
+        GDM_State.getCurrentJobId();
+    }
+
+
+    if (!jobId) {
+
+      return {
+
+        ok:
+          false,
+
+        message:
+          'Aucun job à reprendre.'
+      };
+    }
+
+
+    var state =
+      GDM_State.get(
+        jobId
+      );
+
+
+    if (!state) {
+
+      return {
+
+        ok:
+          false,
+
+        jobId:
+          jobId,
+
+        message:
+          'Job introuvable.'
+      };
+    }
+
+
+    if (
+      state.status ===
+        GDM_JOB_STATUS.COMPLETED ||
+      state.status ===
+        GDM_JOB_STATUS.CANCELLED ||
+      state.status ===
+        GDM_JOB_STATUS.ERROR
+    ) {
+
+      return {
+
+        ok:
+          true,
+
+        jobId:
+          jobId,
+
+        completed:
+          true
+      };
+    }
+
+
+    if (
+      state.pauseRequested ===
+        true ||
+      state.status ===
+        GDM_JOB_STATUS.PAUSED
+    ) {
+
+      return {
+
+        ok:
+          true,
+
+        jobId:
+          jobId,
+
+        paused:
+          true
+      };
+    }
+
+
+    return this.run(
+      jobId
+    );
+  },
+
+
+  /************************************************************************************************
+   * SUPPRIMER LES TRIGGERS D'UN JOB
+   ************************************************************************************************/
+
+  removeResumeTriggers: function(jobId) {
 
     var handler =
       GDM_Config.get(
@@ -1595,10 +2193,18 @@ const GDM_Engine = Object.freeze({
         'GDM_engineTrigger'
       );
 
+
+    var properties =
+      PropertiesService
+        .getScriptProperties();
+
+
     var triggers =
       ScriptApp.getProjectTriggers();
 
+
     var removed = 0;
+
 
     for (
       var i = 0;
@@ -1609,37 +2215,129 @@ const GDM_Engine = Object.freeze({
       var trigger =
         triggers[i];
 
-      var functionName = '';
+
+      var handlerName = '';
+
 
       try {
-        functionName =
+
+        handlerName =
           trigger.getHandlerFunction();
+
       } catch (ignoredHandler) {}
 
+
       if (
-        functionName !==
+        handlerName !==
         handler
       ) {
+
         continue;
       }
 
+
+      var triggerId = '';
+
+
       try {
+
+        triggerId =
+          trigger.getUniqueId();
+
+      } catch (ignoredId) {}
+
+
+      var mappedJobId = '';
+
+
+      if (
+        triggerId
+      ) {
+
+        var raw =
+          properties.getProperty(
+            this.getTriggerPropertyKey_(
+              triggerId
+            )
+          );
+
+
+        if (raw) {
+
+          var info =
+            GDM_Utils.safeJsonParse(
+              raw,
+              {}
+            );
+
+
+          mappedJobId =
+            GDM_Utils.trim(
+              info.jobId
+            );
+        }
+      }
+
+
+      /*
+       * Si jobId est fourni, on ne supprime que ses triggers.
+       * Si jobId est vide, tous les triggers Engine sont supprimés.
+       */
+      if (
+        jobId &&
+        mappedJobId &&
+        mappedJobId !==
+          jobId
+      ) {
+
+        continue;
+      }
+
+
+      /*
+       * Si le mapping existe et appartient à un autre job,
+       * ne jamais le supprimer.
+       */
+      if (
+        jobId &&
+        !mappedJobId
+      ) {
+
+        continue;
+      }
+
+
+      try {
+
         ScriptApp.deleteTrigger(
           trigger
         );
 
+
         removed++;
+
       } catch (ignoredDelete) {}
+
+
+      if (
+        triggerId
+      ) {
+
+        properties.deleteProperty(
+          this.getTriggerPropertyKey_(
+            triggerId
+          )
+        );
+      }
     }
 
-    this.clearTriggerProperties_();
 
     return removed;
   },
 
 
   /************************************************************************************************
-   * NETTOYAGE DES TRIGGERS PROPRES AU MOTEUR
+   * NETTOYER LES MAPPINGS DE TRIGGERS ORPHELINS
    ************************************************************************************************/
 
   cleanupOwnTriggers_: function() {
@@ -1650,13 +2348,13 @@ const GDM_Engine = Object.freeze({
         'GDM_engineTrigger'
       );
 
+
+    var activeTriggerIds = {};
+
+
     var triggers =
       ScriptApp.getProjectTriggers();
 
-    /*
-     * On conserve au maximum un trigger GDM en attente.
-     */
-    var own = [];
 
     for (
       var i = 0;
@@ -1665,51 +2363,29 @@ const GDM_Engine = Object.freeze({
     ) {
 
       try {
+
         if (
           triggers[i].getHandlerFunction() ===
           handler
         ) {
-          own.push(
-            triggers[i]
-          );
+
+          activeTriggerIds[
+            triggers[i].getUniqueId()
+          ] = true;
         }
+
       } catch (ignored) {}
     }
 
-    if (
-      own.length <= 1
-    ) {
-      return 0;
-    }
-
-    var removed = 0;
-
-    for (
-      var j = 1;
-      j < own.length;
-      j++
-    ) {
-      try {
-        ScriptApp.deleteTrigger(
-          own[j]
-        );
-
-        removed++;
-      } catch (ignoredDelete) {}
-    }
-
-    return removed;
-  },
-
-
-  clearTriggerProperties_: function() {
 
     var properties =
       PropertiesService
         .getScriptProperties();
 
+
     var all =
       properties.getProperties();
+
 
     var prefix =
       GDM_Config.get(
@@ -1717,103 +2393,75 @@ const GDM_Engine = Object.freeze({
         'GDMV2_TRIGGER_'
       );
 
+
     var keys =
       Object.keys(
         all
       );
 
+
+    var removed = 0;
+
+
     for (
-      var i = 0;
-      i < keys.length;
-      i++
+      var k = 0;
+      k < keys.length;
+      k++
     ) {
 
+      var key =
+        keys[k];
+
+
       if (
-        keys[i].indexOf(
+        key.indexOf(
           prefix
-        ) === 0
+        ) !== 0
       ) {
-        properties.deleteProperty(
-          keys[i]
+
+        continue;
+      }
+
+
+      var triggerId =
+        key.substring(
+          prefix.length
         );
+
+
+      if (
+        !activeTriggerIds[
+          triggerId
+        ]
+      ) {
+
+        properties.deleteProperty(
+          key
+        );
+
+
+        removed++;
       }
     }
+
+
+    return removed;
   },
 
 
   /************************************************************************************************
-   * CALLBACK DU TRIGGER
+   * CLÉ PROPRIÉTÉ TRIGGER
    ************************************************************************************************/
 
-  triggerRun: function() {
+  getTriggerPropertyKey_: function(
+    triggerId
+  ) {
 
-    var jobId =
-      GDM_State.getCurrentJobId();
-
-    if (!jobId) {
-      this.removeResumeTriggers();
-
-      return {
-        ok: false,
-        message:
-          'Aucun job courant.'
-      };
-    }
-
-    var state =
-      GDM_State.get(
-        jobId
-      );
-
-    if (!state) {
-      GDM_State.clearCurrentJobId();
-
-      this.removeResumeTriggers();
-
-      return {
-        ok: false,
-        message:
-          'Job introuvable.'
-      };
-    }
-
-    if (
-      state.status ===
-        GDM_JOB_STATUS.COMPLETED ||
-      state.status ===
-        GDM_JOB_STATUS.CANCELLED ||
-      state.status ===
-        GDM_JOB_STATUS.ERROR
-    ) {
-      this.removeResumeTriggers();
-
-      return {
-        ok: true,
-        completed: true,
-        jobId:
-          jobId
-      };
-    }
-
-    if (
-      state.pauseRequested ===
-        true ||
-      state.status ===
-        GDM_JOB_STATUS.PAUSED
-    ) {
-      this.removeResumeTriggers();
-
-      return {
-        ok: true,
-        paused: true,
-        jobId:
-          jobId
-      };
-    }
-
-    return this.run(
-      jobId
-    );
+    return GDM_Config.get(
+      'STORAGE_KEYS.TRIGGER_PREFIX',
+      'GDMV2_TRIGGER_'
+    ) +
+    triggerId;
   },
 
 
@@ -1827,16 +2475,19 @@ const GDM_Engine = Object.freeze({
       jobId ||
       GDM_State.getCurrentJobId();
 
+
     jobId =
       GDM_Utils.requireString(
         jobId,
         'jobId'
       );
 
+
     var state =
       GDM_State.require(
         jobId
       );
+
 
     if (
       state.status ===
@@ -1844,85 +2495,66 @@ const GDM_Engine = Object.freeze({
       state.status ===
         GDM_JOB_STATUS.CANCELLED
     ) {
+
       return {
-        ok: true,
-        jobId: jobId,
-        recovered: false,
-        state: state
+
+        ok:
+          true,
+
+        recovered:
+          false,
+
+        jobId:
+          jobId,
+
+        state:
+          state
       };
     }
+
 
     var reset =
       GDM_Queue.resetRunningTasks(
         jobId
       );
 
+
+    /*
+     * Un verrou logique ancien est supprimé.
+     */
+    this.forceReleaseRunToken_(
+      jobId
+    );
+
+
     GDM_State.setCurrentJobId(
       jobId
     );
 
-    if (
-      state.status ===
-      GDM_JOB_STATUS.RUNNING
-    ) {
-      GDM_State.checkpoint(
-        jobId,
-        {
-          message:
-            'Job récupéré après interruption.'
-        }
-      );
-    }
+
+    GDM_State.checkpoint(
+      jobId,
+      {
+
+        message:
+          'Job récupéré après interruption.'
+      }
+    );
+
 
     return {
-      ok: true,
 
-      jobId:
-        jobId,
+      ok:
+        true,
 
       recovered:
         true,
 
-      resetRunningTasks:
-        reset,
-
-      state:
-        GDM_State.get(
-          jobId
-        ),
-
-      queue:
-        GDM_Queue.getMeta(
-          jobId
-        )
-    };
-  },
-
-
-  /************************************************************************************************
-   * STATUT GLOBAL
-   ************************************************************************************************/
-
-  getStatus: function(jobId) {
-
-    jobId =
-      jobId ||
-      GDM_State.getCurrentJobId();
-
-    if (!jobId) {
-      return {
-        active: false,
-        jobId: '',
-        state: null,
-        queue: null
-      };
-    }
-
-    return {
-      active: true,
-
       jobId:
         jobId,
+
+      resetRunningTasks:
+        reset,
 
       state:
         GDM_State.getSummary(
@@ -1938,7 +2570,77 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * RÉSULTAT STANDARD D'UN RUN
+   * STATUT
+   ************************************************************************************************/
+
+  getStatus: function(jobId) {
+
+    jobId =
+      jobId ||
+      GDM_State.getCurrentJobId();
+
+
+    if (!jobId) {
+
+      return {
+
+        active:
+          false,
+
+        jobId:
+          '',
+
+        state:
+          null,
+
+        queue:
+          null
+      };
+    }
+
+
+    var state =
+      GDM_State.getSummary(
+        jobId
+      );
+
+
+    return {
+
+      active:
+        Boolean(
+          state &&
+          (
+            state.status ===
+              GDM_JOB_STATUS.PENDING ||
+            state.status ===
+              GDM_JOB_STATUS.RUNNING ||
+            state.status ===
+              GDM_JOB_STATUS.PAUSED
+          )
+        ),
+
+      jobId:
+        jobId,
+
+      state:
+        state,
+
+      queue:
+        GDM_Queue.getMeta(
+          jobId
+        ),
+
+      engineBusy:
+        this.hasActiveRunToken_(
+          jobId
+        )
+    };
+  },
+
+
+  /************************************************************************************************
+   * RÉSULTAT RUN
    ************************************************************************************************/
 
   buildRunResult_: function(
@@ -1948,14 +2650,17 @@ const GDM_Engine = Object.freeze({
   ) {
 
     return {
-      ok: true,
+
+      ok:
+        true,
 
       jobId:
         jobId,
 
       processedThisRun:
         Number(
-          processedThisRun || 0
+          processedThisRun ||
+          0
         ),
 
       message:
@@ -1977,17 +2682,446 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * DIAGNOSTIC DES MODULES
+   * ERREUR MOTEUR
+   ************************************************************************************************/
+
+  handleRunError_: function(
+    jobId,
+    error
+  ) {
+
+    try {
+
+      GDM_State.setLastError(
+        jobId,
+        GDM_Utils.errorToObject(
+          error,
+          {
+
+            module:
+              'Engine',
+
+            action:
+              'RUN'
+          }
+        )
+      );
+
+    } catch (ignoredState) {}
+
+
+    try {
+
+      GDM_Logger.error(
+        error,
+        {
+
+          jobId:
+            jobId,
+
+          module:
+            'Engine',
+
+          action:
+            'RUN'
+        }
+      );
+
+    } catch (ignoredLog) {}
+
+
+    /*
+     * On ne marque pas automatiquement ERROR lorsqu'une erreur
+     * d'infrastructure temporaire survient.
+     *
+     * Si la queue contient encore des tâches, on tente une reprise.
+     */
+    try {
+
+      var state =
+        GDM_State.get(
+          jobId
+        );
+
+
+      if (
+        state &&
+        state.status ===
+          GDM_JOB_STATUS.RUNNING &&
+        GDM_Queue.hasPending(
+          jobId
+        ) &&
+        state.cancelRequested !==
+          true &&
+        state.pauseRequested !==
+          true
+      ) {
+
+        this.scheduleResume(
+          jobId,
+          GDM_Config.get(
+            'TRIGGERS.RESUME_DELAY_MS',
+            5000
+          )
+        );
+      }
+
+    } catch (ignoredSchedule) {}
+  },
+
+
+  /************************************************************************************************
+   * VERROU LOGIQUE PAR JOB
+   *
+   * Le ScriptLock n'est utilisé que quelques millisecondes pour
+   * lire/écrire la propriété du verrou.
+   ************************************************************************************************/
+
+  acquireRunToken_: function(jobId) {
+
+    var self =
+      this;
+
+
+    return GDM_Utils.withScriptLock(
+      function() {
+
+        var properties =
+          PropertiesService
+            .getScriptProperties();
+
+
+        var key =
+          self.RUN_LOCK_PREFIX_ +
+          jobId;
+
+
+        var existing =
+          GDM_Utils.safeJsonParse(
+            properties.getProperty(
+              key
+            ),
+            null
+          );
+
+
+        var now =
+          Date.now();
+
+
+        if (
+          existing &&
+          Number(
+            existing.expiresAt ||
+            0
+          ) >
+          now
+        ) {
+
+          return null;
+        }
+
+
+        var token =
+          Utilities.getUuid();
+
+
+        var ttl =
+          GDM_Utils.toPositiveInteger(
+            GDM_Config.get(
+              'RUNTIME.MAX_EXECUTION_MS',
+              270000
+            ),
+            270000
+          ) +
+          120000;
+
+
+        properties.setProperty(
+          key,
+          JSON.stringify({
+
+            token:
+              token,
+
+            jobId:
+              jobId,
+
+            createdAt:
+              now,
+
+            updatedAt:
+              now,
+
+            expiresAt:
+              now +
+              ttl
+          })
+        );
+
+
+        return token;
+
+      },
+      GDM_Config.get(
+        'LOCK.ENGINE_LOCK_TIMEOUT_MS',
+        5000
+      )
+    );
+  },
+
+
+  /************************************************************************************************
+   * RAFRAÎCHIR VERROU
+   ************************************************************************************************/
+
+  refreshRunToken_: function(
+    jobId,
+    token
+  ) {
+
+    var self =
+      this;
+
+
+    try {
+
+      return GDM_Utils.withScriptLock(
+        function() {
+
+          var properties =
+            PropertiesService
+              .getScriptProperties();
+
+
+          var key =
+            self.RUN_LOCK_PREFIX_ +
+            jobId;
+
+
+          var existing =
+            GDM_Utils.safeJsonParse(
+              properties.getProperty(
+                key
+              ),
+              null
+            );
+
+
+          if (
+            !existing ||
+            existing.token !==
+              token
+          ) {
+
+            return false;
+          }
+
+
+          var now =
+            Date.now();
+
+
+          var ttl =
+            GDM_Utils.toPositiveInteger(
+              GDM_Config.get(
+                'RUNTIME.MAX_EXECUTION_MS',
+                270000
+              ),
+              270000
+            ) +
+            120000;
+
+
+          existing.updatedAt =
+            now;
+
+
+          existing.expiresAt =
+            now +
+            ttl;
+
+
+          properties.setProperty(
+            key,
+            JSON.stringify(
+              existing
+            )
+          );
+
+
+          return true;
+
+        },
+        GDM_Config.get(
+          'LOCK.ENGINE_LOCK_TIMEOUT_MS',
+          5000
+        )
+      );
+
+    } catch (ignored) {
+
+      return false;
+    }
+  },
+
+
+  /************************************************************************************************
+   * LIBÉRER VERROU
+   ************************************************************************************************/
+
+  releaseRunToken_: function(
+    jobId,
+    token
+  ) {
+
+    var self =
+      this;
+
+
+    try {
+
+      return GDM_Utils.withScriptLock(
+        function() {
+
+          var properties =
+            PropertiesService
+              .getScriptProperties();
+
+
+          var key =
+            self.RUN_LOCK_PREFIX_ +
+            jobId;
+
+
+          var existing =
+            GDM_Utils.safeJsonParse(
+              properties.getProperty(
+                key
+              ),
+              null
+            );
+
+
+          if (
+            existing &&
+            existing.token ===
+              token
+          ) {
+
+            properties.deleteProperty(
+              key
+            );
+
+
+            return true;
+          }
+
+
+          return false;
+
+        },
+        GDM_Config.get(
+          'LOCK.ENGINE_LOCK_TIMEOUT_MS',
+          5000
+        )
+      );
+
+    } catch (ignored) {
+
+      return false;
+    }
+  },
+
+
+  /************************************************************************************************
+   * FORCER LIBÉRATION
+   ************************************************************************************************/
+
+  forceReleaseRunToken_: function(jobId) {
+
+    try {
+
+      PropertiesService
+        .getScriptProperties()
+        .deleteProperty(
+          this.RUN_LOCK_PREFIX_ +
+          jobId
+        );
+
+
+      return true;
+
+    } catch (ignored) {
+
+      return false;
+    }
+  },
+
+
+  /************************************************************************************************
+   * VERROU ACTIF ?
+   ************************************************************************************************/
+
+  hasActiveRunToken_: function(jobId) {
+
+    try {
+
+      var existing =
+        GDM_Utils.safeJsonParse(
+          PropertiesService
+            .getScriptProperties()
+            .getProperty(
+              this.RUN_LOCK_PREFIX_ +
+              jobId
+            ),
+          null
+        );
+
+
+      if (!existing) {
+
+        return false;
+      }
+
+
+      if (
+        Number(
+          existing.expiresAt ||
+          0
+        ) <=
+        Date.now()
+      ) {
+
+        this.forceReleaseRunToken_(
+          jobId
+        );
+
+
+        return false;
+      }
+
+
+      return true;
+
+    } catch (ignored) {
+
+      return false;
+    }
+  },
+
+
+  /************************************************************************************************
+   * STATUT MODULES
    ************************************************************************************************/
 
   getModuleStatus: function() {
 
     return {
+
       Explorer:
         typeof GDM_Explorer !==
-          'undefined' &&
-        typeof GDM_Explorer.processTask ===
-          'function',
+          'undefined',
 
       Analysis:
         typeof GDM_Analysis !==
@@ -2035,12 +3169,13 @@ const GDM_Engine = Object.freeze({
 
 
   /************************************************************************************************
-   * VALIDATION DU MOTEUR
+   * VALIDATION
    ************************************************************************************************/
 
   validate: function() {
 
     var errors = [];
+
 
     try {
 
@@ -2048,50 +3183,45 @@ const GDM_Engine = Object.freeze({
         typeof GDM_State ===
         'undefined'
       ) {
+
         errors.push(
           'GDM_State indisponible.'
         );
       }
 
+
       if (
         typeof GDM_Queue ===
         'undefined'
       ) {
+
         errors.push(
           'GDM_Queue indisponible.'
         );
       }
 
-      if (
-        typeof GDM_Logger ===
-        'undefined'
-      ) {
-        errors.push(
-          'GDM_Logger indisponible.'
-        );
-      }
 
       if (
         typeof GDM_Utils ===
         'undefined'
       ) {
+
         errors.push(
           'GDM_Utils indisponible.'
         );
       }
 
-      var softLimit =
-        GDM_Config.getSoftExecutionLimit();
 
       if (
-        Number(
-          softLimit
-        ) <= 0
+        typeof GDM_Logger ===
+        'undefined'
       ) {
+
         errors.push(
-          'Limite d’exécution invalide.'
+          'GDM_Logger indisponible.'
         );
       }
+
 
       var handler =
         GDM_Config.get(
@@ -2099,26 +3229,29 @@ const GDM_Engine = Object.freeze({
           ''
         );
 
+
       if (
         handler !==
         'GDM_engineTrigger'
       ) {
+
         errors.push(
-          'Le handler de déclencheur attendu est GDM_engineTrigger.'
+          'Handler trigger incorrect.'
         );
       }
 
     } catch (error) {
 
       errors.push(
-        'Erreur Engine.gs : ' +
         GDM_Utils.getErrorMessage(
           error
         )
       );
     }
 
+
     return {
+
       ok:
         errors.length === 0,
 
@@ -2126,7 +3259,10 @@ const GDM_Engine = Object.freeze({
         'Core/Engine.gs',
 
       version:
-        GDM_APP.VERSION,
+        '2.0.1',
+
+      longScriptLock:
+        false,
 
       modules:
         this.getModuleStatus(),
@@ -2140,16 +3276,18 @@ const GDM_Engine = Object.freeze({
 
 
 /**************************************************************************************************
- * HANDLER GLOBAL APPS SCRIPT
- *
- * Cette fonction doit rester globale.
- * ScriptApp appelle cette fonction lors d'une reprise automatique.
+ * HANDLER GLOBAL DU TRIGGER
  **************************************************************************************************/
 
-function GDM_engineTrigger() {
+function GDM_engineTrigger(e) {
 
   try {
-    return GDM_Engine.triggerRun();
+
+    return GDM_Engine.triggerRun(
+      e ||
+      {}
+    );
+
   } catch (error) {
 
     try {
@@ -2157,11 +3295,15 @@ function GDM_engineTrigger() {
       var jobId =
         GDM_State.getCurrentJobId();
 
-      if (jobId) {
+
+      if (
+        jobId
+      ) {
 
         GDM_Logger.error(
           error,
           {
+
             jobId:
               jobId,
 
@@ -2172,41 +3314,10 @@ function GDM_engineTrigger() {
               'TRIGGER_RUN'
           }
         );
-
-        /*
-         * On ne passe pas immédiatement le job en ERROR :
-         * une erreur temporaire Apps Script peut être récupérable.
-         */
-        var state =
-          GDM_State.get(
-            jobId
-          );
-
-        if (
-          state &&
-          state.status ===
-            GDM_JOB_STATUS.RUNNING &&
-          GDM_Queue.hasPending(
-            jobId
-          )
-        ) {
-          try {
-            GDM_Engine.scheduleResume(
-              jobId,
-              GDM_Config.get(
-                'TRIGGERS.RESUME_DELAY_MS',
-                5000
-              )
-            );
-          } catch (
-            ignoredSchedule
-          ) {}
-        }
       }
 
-    } catch (
-      ignoredLogging
-    ) {}
+    } catch (ignored) {}
+
 
     throw error;
   }
