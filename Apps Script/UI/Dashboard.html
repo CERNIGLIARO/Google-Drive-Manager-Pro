@@ -1,0 +1,1784 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      padding: 14px;
+      color: #202124;
+    }
+
+    h2 {
+      margin: 0 0 8px;
+    }
+
+    .notice {
+      background: #e8f0fe;
+      border: 1px solid #8ab4f8;
+      border-radius: 7px;
+      padding: 9px;
+      margin-bottom: 10px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 5px;
+      flex-wrap: wrap;
+      margin-bottom: 12px;
+    }
+
+    .tabbtn {
+      border: 0;
+      border-radius: 6px;
+      padding: 8px 11px;
+      cursor: pointer;
+      background: #e8eaed;
+    }
+
+    .tabbtn.active {
+      background: #1a73e8;
+      color: white;
+    }
+
+    .tab {
+      display: none;
+    }
+
+    .tab.active {
+      display: block;
+    }
+
+    .box {
+      border: 1px solid #dadce0;
+      border-radius: 8px;
+      padding: 11px;
+      margin-bottom: 10px;
+    }
+
+    .row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .grow {
+      flex: 1;
+      min-width: 260px;
+    }
+
+    .folderName {
+      font-weight: bold;
+      background: #f1f3f4;
+      padding: 7px;
+      border-radius: 5px;
+      min-height: 20px;
+    }
+
+    button {
+      border: 0;
+      border-radius: 5px;
+      padding: 8px 12px;
+      cursor: pointer;
+    }
+
+    .blue {
+      background: #1a73e8;
+      color: white;
+    }
+
+    .green {
+      background: #188038;
+      color: white;
+    }
+
+    .red {
+      background: #c5221f;
+      color: white;
+    }
+
+    .gray {
+      background: #e8eaed;
+    }
+
+    label {
+      display: inline-block;
+      margin: 4px 8px 4px 0;
+    }
+
+    .small {
+      font-size: 12px;
+      color: #5f6368;
+    }
+
+    input[type=text],
+    input[type=number] {
+      padding: 6px;
+      border: 1px solid #dadce0;
+      border-radius: 4px;
+    }
+
+    #picker {
+      display: none;
+      position: sticky;
+      bottom: 0;
+      background: white;
+      border: 2px solid #1a73e8;
+      border-radius: 8px;
+      padding: 10px;
+      margin-top: 10px;
+      z-index: 10;
+    }
+
+    #folderList {
+      max-height: 220px;
+      overflow: auto;
+      border: 1px solid #eee;
+    }
+
+    .folder {
+      padding: 7px;
+      border-bottom: 1px solid #eee;
+      cursor: pointer;
+    }
+
+    .folder:hover {
+      background: #f1f3f4;
+    }
+
+    .status {
+      margin-top: 10px;
+      padding: 10px;
+      background: #f1f3f4;
+      border-radius: 6px;
+      white-space: pre-line;
+    }
+  </style>
+</head>
+
+<body>
+
+  <h2>🧰 Google Drive Toolbox V9.1 — FIX AUTORISATIONS</h2>
+
+  <div class="notice">
+    <b>Version gros Drive :</b>
+    uniquement DriveApp + traitements par lots + reprise automatique.
+    Aucun fichier n'est supprimé. Analyse, déplacement, classement, copie complète,
+    doublons, archivage, renommage et déplacement de dossiers sont regroupés ici.
+    <br>
+    <span class="small">
+      Première utilisation : menu GOOGLE DRIVE V9 → Autoriser / tester V9.1.
+      Le test des déclencheurs est maintenant séparé.
+    </span>
+  </div>
+
+
+  <div class="tabs">
+
+    <button
+      class="tabbtn active"
+      onclick="showTab('analyse',this)">
+      📊 Analyser
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('move',this)">
+      🗂️ Déplacer / classer
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('copy',this)">
+      📦 Copier dossier
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('dup',this)">
+      🔁 Doublons
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('archive',this)">
+      🗄️ Archiver
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('rename',this)">
+      ✏️ Renommer
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('folderTools',this)">
+      📁 Dossiers
+    </button>
+
+    <button
+      class="tabbtn"
+      onclick="showTab('statusTab',this)">
+      📍 Statut
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       ANALYSE
+       ======================================================= -->
+
+  <div
+    id="analyse"
+    class="tab active">
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier à analyser</b>
+
+          <div
+            id="analysisSourceName"
+            class="folderName">
+            Mon Drive
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('analysisSource')">
+          Choisir
+        </button>
+
+      </div>
+
+      <label>
+        <input
+          id="analysisRecursive"
+          type="checkbox"
+          checked>
+        Inclure les sous-dossiers
+      </label>
+
+    </div>
+
+
+    <div class="box">
+
+      <label>
+        Gros fichier à partir de
+        <input
+          id="largeMB"
+          type="number"
+          value="100"
+          min="1"
+          style="width:80px">
+        Mo
+      </label>
+
+      <label>
+        Ancien après
+        <input
+          id="oldDays"
+          type="number"
+          value="365"
+          min="1"
+          style="width:80px">
+        jours
+      </label>
+
+      <div class="small">
+        L'analyse fournit : taille totale, nombre de fichiers/dossiers,
+        types, gros fichiers, anciens fichiers, dossiers vides,
+        raccourcis et fichiers sans extension.
+      </div>
+
+    </div>
+
+    <button
+      class="green"
+      onclick="startAnalysis()">
+      ▶ LANCER L'ANALYSE
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       MOVE
+       ======================================================= -->
+
+  <div
+    id="move"
+    class="tab">
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier source</b>
+
+          <div
+            id="moveSourceName"
+            class="folderName">
+            Mon Drive
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('moveSource')">
+          Choisir
+        </button>
+
+      </div>
+
+      <label>
+        <input
+          id="moveRecursive"
+          type="checkbox"
+          checked>
+        Inclure les sous-dossiers
+      </label>
+
+    </div>
+
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier destination</b>
+
+          <div
+            id="moveDestinationName"
+            class="folderName">
+            Non choisi
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('moveDestination')">
+          Choisir
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <div class="box">
+
+      <b>Action</b><br>
+
+      <label>
+        <input
+          type="radio"
+          name="moveAction"
+          value="move"
+          checked>
+        Tout vers le dossier destination
+      </label>
+
+      <label>
+        <input
+          type="radio"
+          name="moveAction"
+          value="sortByType">
+        Classer automatiquement par type
+      </label>
+
+    </div>
+
+
+    <div class="box">
+
+      <b>Types de fichiers</b><br>
+
+      <label><input class="moveType" type="checkbox" value="PDF"> PDF</label>
+      <label><input class="moveType" type="checkbox" value="IMAGE"> Images</label>
+      <label><input class="moveType" type="checkbox" value="VIDEO"> Vidéos</label>
+      <label><input class="moveType" type="checkbox" value="AUDIO"> Audio</label>
+      <label><input class="moveType" type="checkbox" value="WORD"> Word</label>
+      <label><input class="moveType" type="checkbox" value="EXCEL"> Excel / CSV</label>
+      <label><input class="moveType" type="checkbox" value="POWERPOINT"> PowerPoint</label>
+      <label><input class="moveType" type="checkbox" value="ARCHIVE"> ZIP / RAR / 7Z</label>
+      <label><input class="moveType" type="checkbox" value="CAD_BIM"> CAO / BIM</label>
+      <label><input class="moveType" type="checkbox" value="EMAIL"> EML / MSG</label>
+      <label><input class="moveType" type="checkbox" value="GOOGLE_DOCS"> Google Docs</label>
+      <label><input class="moveType" type="checkbox" value="GOOGLE_SHEETS"> Google Sheets</label>
+      <label><input class="moveType" type="checkbox" value="GOOGLE_SLIDES"> Google Slides</label>
+      <label><input class="moveType" type="checkbox" value="NO_EXTENSION"> Sans extension</label>
+      <label><input class="moveType" type="checkbox" value="OTHER"> Autres</label>
+      <label><input class="moveType" type="checkbox" value="ALL"> Tous les fichiers</label>
+
+      <div style="margin-top:8px">
+
+        <b>Extensions personnalisées</b><br>
+
+        <input
+          id="moveExtensions"
+          type="text"
+          style="width:95%"
+          placeholder="ex. heic, psd, xml, json">
+
+      </div>
+
+    </div>
+
+
+    <button
+      class="blue"
+      onclick="previewMove()">
+      👁 APERÇU
+    </button>
+
+    <button
+      class="green"
+      onclick="startMove()">
+      ▶ DÉPLACER / CLASSER
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       COPY
+       ======================================================= -->
+
+  <div
+    id="copy"
+    class="tab">
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier à copier</b>
+
+          <div
+            id="copySourceName"
+            class="folderName">
+            Non choisi
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('copySource')">
+          Choisir
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier destination</b>
+
+          <div
+            id="copyDestinationName"
+            class="folderName">
+            Non choisi
+          </div>
+
+          <div class="small">
+            La copie sera créée à l'intérieur de ce dossier.
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('copyDestination')">
+          Choisir
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <div class="box">
+
+      <label>
+        <input
+          id="copyCreateRoot"
+          type="checkbox"
+          checked>
+        Créer un nouveau dossier racine
+      </label>
+
+      <br>
+
+      <b>Nom du nouveau dossier</b><br>
+
+      <input
+        id="copyRootName"
+        type="text"
+        style="width:95%"
+        placeholder="vide = Nom source - Copie date heure">
+
+      <br><br>
+
+      <label>
+        <input
+          id="copySubfolders"
+          type="checkbox"
+          checked>
+        Copier tous les sous-dossiers
+      </label>
+
+      <label>
+        <input
+          id="copyActiveSheet"
+          type="checkbox">
+        Inclure aussi ce Google Sheets s'il se trouve dans le dossier source
+      </label>
+
+    </div>
+
+
+    <button
+      class="green"
+      onclick="startCopy()">
+      ▶ COPIER LE DOSSIER COMPLET
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       DUPLICATES
+       ======================================================= -->
+
+  <div
+    id="dup"
+    class="tab">
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier à analyser pour les doublons</b>
+
+          <div
+            id="dupSourceName"
+            class="folderName">
+            Mon Drive
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('dupSource')">
+          Choisir
+        </button>
+
+      </div>
+
+      <label>
+        <input
+          id="dupRecursive"
+          type="checkbox"
+          checked>
+        Inclure les sous-dossiers
+      </label>
+
+      <div class="small">
+        Détection basse mémoire : même nom normalisé + même taille + même type MIME.
+        Ce sont donc des <b>doublons potentiels</b>, à vérifier avant déplacement.
+      </div>
+
+    </div>
+
+
+    <button
+      class="green"
+      onclick="startDupScan()">
+      🔎 RECHERCHER LES DOUBLONS
+    </button>
+
+
+    <hr style="margin:16px 0">
+
+
+    <div class="box">
+
+      <div class="row">
+
+        <div class="grow">
+
+          <b>Dossier où déplacer les doublons</b>
+
+          <div
+            id="dupDestinationName"
+            class="folderName">
+            Non choisi
+          </div>
+
+        </div>
+
+        <button
+          class="gray"
+          onclick="openPicker('dupDestination')">
+          Choisir
+        </button>
+
+      </div>
+
+      <div class="small">
+        Le script garde le fichier le plus ancien de chaque groupe et déplace les autres.
+        Aucun fichier n'est supprimé. Analyse, déplacement, classement, copie complète,
+    doublons, archivage, renommage et déplacement de dossiers sont regroupés ici.
+      </div>
+
+    </div>
+
+
+    <button
+      class="blue"
+      onclick="startMoveDup()">
+      📦 DÉPLACER LES DOUBLONS DU DERNIER RAPPORT
+    </button>
+
+  </div>
+
+
+
+  <!-- =======================================================
+       ARCHIVE
+       ======================================================= -->
+
+  <div id="archive" class="tab">
+
+    <div class="box">
+      <div class="row">
+        <div class="grow">
+          <b>Dossier source</b>
+          <div id="archiveSourceName" class="folderName">Mon Drive</div>
+        </div>
+        <button class="gray" onclick="openPicker('archiveSource')">Choisir</button>
+      </div>
+
+      <label>
+        <input id="archiveRecursive" type="checkbox" checked>
+        Inclure les sous-dossiers
+      </label>
+    </div>
+
+    <div class="box">
+      <div class="row">
+        <div class="grow">
+          <b>Dossier destination des archives</b>
+          <div id="archiveDestinationName" class="folderName">Non choisi</div>
+        </div>
+        <button class="gray" onclick="openPicker('archiveDestination')">Choisir</button>
+      </div>
+    </div>
+
+    <div class="box">
+      <label>
+        Déplacer les fichiers non modifiés depuis
+        <input id="archiveDays" type="number" value="365" min="1" style="width:90px">
+        jours
+      </label>
+
+      <div class="small">
+        Le script déplace les fichiers anciens vers la destination, sans les supprimer.
+      </div>
+    </div>
+
+    <button class="green" onclick="startArchive()">
+      ▶ ARCHIVER LES FICHIERS ANCIENS
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       RENAME
+       ======================================================= -->
+
+  <div id="rename" class="tab">
+
+    <div class="box">
+      <div class="row">
+        <div class="grow">
+          <b>Dossier source</b>
+          <div id="renameSourceName" class="folderName">Mon Drive</div>
+        </div>
+        <button class="gray" onclick="openPicker('renameSource')">Choisir</button>
+      </div>
+
+      <label>
+        <input id="renameRecursive" type="checkbox" checked>
+        Inclure les sous-dossiers
+      </label>
+    </div>
+
+    <div class="box">
+      <b>Renommage</b><br><br>
+
+      <label>
+        Préfixe
+        <input id="renamePrefix" type="text" placeholder="ex. ARCHIVE_">
+      </label>
+
+      <label>
+        Suffixe
+        <input id="renameSuffix" type="text" placeholder="ex. _2026">
+      </label>
+
+      <br><br>
+
+      <label>
+        Rechercher
+        <input id="renameSearch" type="text" placeholder="ancien texte">
+      </label>
+
+      <label>
+        Remplacer par
+        <input id="renameReplace" type="text" placeholder="nouveau texte">
+      </label>
+
+      <br><br>
+
+      <b>Limiter à certaines extensions</b><br>
+      <input
+        id="renameExtensions"
+        type="text"
+        style="width:95%"
+        placeholder="vide = tous les fichiers ; ex. pdf, jpg, xlsx">
+
+      <div class="small">
+        Le suffixe est ajouté avant l'extension. Exemple : facture.pdf → facture_2026.pdf.
+      </div>
+    </div>
+
+    <button class="blue" onclick="previewRename()">
+      👁 APERÇU RENOMMAGE
+    </button>
+
+    <button class="green" onclick="startRename()">
+      ▶ RENOMMER EN MASSE
+    </button>
+
+  </div>
+
+
+  <!-- =======================================================
+       FOLDER TOOLS
+       ======================================================= -->
+
+  <div id="folderTools" class="tab">
+
+    <div class="box">
+      <b>Déplacer un dossier complet</b>
+
+      <div class="row" style="margin-top:10px">
+        <div class="grow">
+          <b>Dossier à déplacer</b>
+          <div id="folderMoveSourceName" class="folderName">Non choisi</div>
+        </div>
+        <button class="gray" onclick="openPicker('folderMoveSource')">Choisir</button>
+      </div>
+
+      <div class="row" style="margin-top:10px">
+        <div class="grow">
+          <b>Dossier destination</b>
+          <div id="folderMoveDestinationName" class="folderName">Non choisi</div>
+        </div>
+        <button class="gray" onclick="openPicker('folderMoveDestination')">Choisir</button>
+      </div>
+
+      <div class="small" style="margin-top:8px">
+        Le dossier entier est déplacé avec toute son arborescence. Aucun fichier n'est recopié.
+      </div>
+
+      <button class="green" style="margin-top:10px" onclick="moveWholeFolder()">
+        ▶ DÉPLACER LE DOSSIER COMPLET
+      </button>
+    </div>
+
+    <div class="box">
+      <b>Outils déjà inclus ailleurs dans V9</b><br>
+      • Copier un dossier complet avec tous ses sous-dossiers<br>
+      • Classer les fichiers automatiquement par type<br>
+      • Déplacer les doublons du dernier rapport<br>
+      • Archiver les fichiers anciens<br>
+      • Renommer des milliers de fichiers par lots<br>
+      • Analyser gros fichiers, anciens fichiers, dossiers vides, types et taille totale
+    </div>
+
+  </div>
+
+
+  <!-- =======================================================
+       STATUS
+       ======================================================= -->
+
+  <div
+    id="statusTab"
+    class="tab">
+
+    <div class="box">
+
+      <button
+        class="blue"
+        onclick="refreshStatus()">
+        ↻ ACTUALISER
+      </button>
+
+      <button
+        class="green"
+        onclick="resumeJob()">
+        ▶ REPRENDRE
+      </button>
+
+      <button
+        class="red"
+        onclick="stopJob()">
+        ⛔ ARRÊTER
+      </button>
+
+    </div>
+
+  </div>
+
+
+  <!-- PICKER -->
+
+  <div id="picker">
+
+    <div class="row">
+
+      <button
+        id="backBtn"
+        class="gray"
+        onclick="goBack()">
+        ⬅ Retour
+      </button>
+
+      <div class="grow">
+
+        <b id="pickerTitle">
+          Choisir un dossier
+        </b>
+
+        <div
+          id="currentFolder"
+          class="folderName">
+          Chargement...
+        </div>
+
+      </div>
+
+      <button
+        class="blue"
+        onclick="chooseCurrentFolder()">
+        Choisir ce dossier
+      </button>
+
+    </div>
+
+    <div
+      id="folderList"
+      style="margin-top:8px">
+    </div>
+
+  </div>
+
+
+  <div
+    id="status"
+    class="status">
+    Prêt.
+  </div>
+
+
+<script>
+
+let folders = {
+  analysisSource: null,
+  moveSource: null,
+  moveDestination: null,
+  copySource: null,
+  copyDestination: null,
+  dupSource: null,
+  dupDestination: null,
+  archiveSource: null,
+  archiveDestination: null,
+  renameSource: null,
+  folderMoveSource: null,
+  folderMoveDestination: null
+};
+
+let pickerMode = null;
+let currentData = null;
+let pollTimer = null;
+
+
+function showTab(id, btn) {
+
+  document
+    .querySelectorAll('.tab')
+    .forEach(function(x) {
+      x.classList.remove('active');
+    });
+
+  document
+    .querySelectorAll('.tabbtn')
+    .forEach(function(x) {
+      x.classList.remove('active');
+    });
+
+  document
+    .getElementById(id)
+    .classList.add('active');
+
+  btn.classList.add('active');
+}
+
+
+function init() {
+
+  google.script.run
+    .withSuccessHandler(function(data) {
+
+      if (!data || data.ok === false) {
+        showError({
+          message:
+            (data && data.error) ||
+            'Impossible de lire Mon Drive.'
+        });
+        return;
+      }
+
+      const root = {
+        id: data.id,
+        name: data.name
+      };
+
+      folders.analysisSource = root;
+      folders.moveSource = root;
+      folders.dupSource = root;
+      folders.archiveSource = root;
+      folders.renameSource = root;
+
+      document
+        .getElementById('analysisSourceName')
+        .textContent = root.name;
+
+      document
+        .getElementById('moveSourceName')
+        .textContent = root.name;
+
+      document
+        .getElementById('dupSourceName')
+        .textContent = root.name;
+
+      document
+        .getElementById('archiveSourceName')
+        .textContent = root.name;
+
+      document
+        .getElementById('renameSourceName')
+        .textContent = root.name;
+
+      refreshStatus();
+
+    })
+    .withFailureHandler(showError)
+    .getFolderPickerDataV9(null);
+}
+
+
+function openPicker(mode) {
+
+  pickerMode = mode;
+
+  document
+    .getElementById('picker')
+    .style.display = 'block';
+
+  document
+    .getElementById('pickerTitle')
+    .textContent = 'Choisir : ' + mode;
+
+  loadFolder(null);
+}
+
+
+function loadFolder(id) {
+
+  document
+    .getElementById('folderList')
+    .innerHTML = 'Chargement...';
+
+  google.script.run
+    .withSuccessHandler(renderFolder)
+    .withFailureHandler(showError)
+    .getFolderPickerDataV9(id);
+}
+
+
+function renderFolder(data) {
+
+  if (!data || data.ok === false) {
+    showError({
+      message:
+        (data && data.error) ||
+        'Erreur lors de la lecture du dossier.'
+    });
+    return;
+  }
+
+  currentData = data;
+
+  document
+    .getElementById('currentFolder')
+    .textContent = data.name;
+
+  document
+    .getElementById('backBtn')
+    .disabled = !data.parentId;
+
+  const list =
+    document.getElementById('folderList');
+
+  list.innerHTML = '';
+
+  if (!data.folders.length) {
+
+    list.innerHTML =
+      '<div style="padding:10px">Aucun sous-dossier</div>';
+
+    return;
+  }
+
+  data.folders.forEach(function(f) {
+
+    const d =
+      document.createElement('div');
+
+    d.className =
+      'folder';
+
+    d.textContent =
+      '📁 ' + f.name;
+
+    d.onclick =
+      function() {
+        loadFolder(f.id);
+      };
+
+    list.appendChild(d);
+  });
+}
+
+
+function goBack() {
+
+  if (
+    currentData &&
+    currentData.parentId
+  ) {
+    loadFolder(
+      currentData.parentId
+    );
+  }
+}
+
+
+function chooseCurrentFolder() {
+
+  if (!currentData) {
+    return;
+  }
+
+  const obj = {
+    id: currentData.id,
+    name: currentData.name
+  };
+
+  folders[pickerMode] = obj;
+
+  const map = {
+    analysisSource: 'analysisSourceName',
+    moveSource: 'moveSourceName',
+    moveDestination: 'moveDestinationName',
+    copySource: 'copySourceName',
+    copyDestination: 'copyDestinationName',
+    dupSource: 'dupSourceName',
+    dupDestination: 'dupDestinationName',
+    archiveSource: 'archiveSourceName',
+    archiveDestination: 'archiveDestinationName',
+    renameSource: 'renameSourceName',
+    folderMoveSource: 'folderMoveSourceName',
+    folderMoveDestination: 'folderMoveDestinationName'
+  };
+
+  if (map[pickerMode]) {
+
+    document
+      .getElementById(
+        map[pickerMode]
+      )
+      .textContent = obj.name;
+  }
+
+  document
+    .getElementById('picker')
+    .style.display = 'none';
+}
+
+
+function setStatus(text) {
+
+  document
+    .getElementById('status')
+    .textContent = text;
+}
+
+
+function startAnalysis() {
+
+  if (!folders.analysisSource) {
+    alert('Choisis le dossier à analyser.');
+    return;
+  }
+
+  setStatus('Démarrage de l’analyse V9...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerAnalyseV9({
+      sourceId:
+        folders.analysisSource.id,
+      recursive:
+        document
+          .getElementById('analysisRecursive')
+          .checked,
+      largeFileMB:
+        document
+          .getElementById('largeMB')
+          .value,
+      oldFileDays:
+        document
+          .getElementById('oldDays')
+          .value
+    });
+}
+
+
+function getMoveOptions() {
+
+  const types =
+    Array.prototype
+      .slice
+      .call(
+        document.querySelectorAll(
+          '.moveType:checked'
+        )
+      )
+      .map(
+        function(x) {
+          return x.value;
+        }
+      );
+
+  return {
+    sourceId:
+      folders.moveSource
+        ? folders.moveSource.id
+        : '',
+
+    destinationId:
+      folders.moveDestination
+        ? folders.moveDestination.id
+        : '',
+
+    recursive:
+      document
+        .getElementById('moveRecursive')
+        .checked,
+
+    action:
+      document
+        .querySelector(
+          'input[name=moveAction]:checked'
+        )
+        .value,
+
+    types: types,
+
+    extensions:
+      document
+        .getElementById('moveExtensions')
+        .value
+  };
+}
+
+
+function previewMove() {
+
+  if (!folders.moveDestination) {
+    alert('Choisis le dossier destination.');
+    return;
+  }
+
+  setStatus('Création de l’aperçu...');
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+        setStatus(
+          'ERREUR : ' +
+          (
+            (r && r.error) ||
+            'Erreur inconnue'
+          )
+        );
+        return;
+      }
+
+      setStatus(
+        'Aperçu créé : ' +
+        r.matched +
+        ' fichier(s) correspondant(s) parmi ' +
+        r.scanned +
+        ' analysé(s).\nFeuille : ' +
+        r.sheetName +
+        (
+          r.limited
+            ? '\nAperçu volontairement limité.'
+            : ''
+        )
+      );
+
+    })
+    .withFailureHandler(showError)
+    .apercuDeplacementV9(
+      getMoveOptions()
+    );
+}
+
+
+function startMove() {
+
+  if (!folders.moveDestination) {
+    alert('Choisis le dossier destination.');
+    return;
+  }
+
+  if (!confirm(
+    'Démarrer le déplacement / classement V9 ?\n\nAucun fichier ne sera supprimé.'
+  )) {
+    return;
+  }
+
+  setStatus('Démarrage du déplacement...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerDeplacementV9(
+      getMoveOptions()
+    );
+}
+
+
+function startCopy() {
+
+  if (!folders.copySource) {
+    alert('Choisis le dossier à copier.');
+    return;
+  }
+
+  if (!folders.copyDestination) {
+    alert('Choisis le dossier destination.');
+    return;
+  }
+
+  if (!confirm(
+    'Copier le dossier complet et son arborescence ?\n\nCela crée de nouveaux fichiers dans Drive.'
+  )) {
+    return;
+  }
+
+  setStatus('Démarrage de la copie...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerCopieV9({
+      sourceId:
+        folders.copySource.id,
+
+      destinationParentId:
+        folders.copyDestination.id,
+
+      createRootFolder:
+        document
+          .getElementById('copyCreateRoot')
+          .checked,
+
+      rootFolderName:
+        document
+          .getElementById('copyRootName')
+          .value,
+
+      copySubfolders:
+        document
+          .getElementById('copySubfolders')
+          .checked,
+
+      includeActiveSpreadsheet:
+        document
+          .getElementById('copyActiveSheet')
+          .checked
+    });
+}
+
+
+function startDupScan() {
+
+  if (!folders.dupSource) {
+    alert('Choisis le dossier à analyser.');
+    return;
+  }
+
+  setStatus('Démarrage de la recherche de doublons...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerDoublonsV9({
+      sourceId:
+        folders.dupSource.id,
+
+      recursive:
+        document
+          .getElementById('dupRecursive')
+          .checked
+    });
+}
+
+
+function startMoveDup() {
+
+  if (!folders.dupDestination) {
+    alert('Choisis le dossier destination des doublons.');
+    return;
+  }
+
+  if (!confirm(
+    'Déplacer les doublons indiqués "DÉPLACER" dans le dernier rapport ?\n\nLe plus ancien de chaque groupe reste en place. Aucun fichier n’est supprimé.'
+  )) {
+    return;
+  }
+
+  setStatus('Démarrage du déplacement des doublons...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerDeplacementDoublonsV9({
+      destinationId:
+        folders.dupDestination.id
+    });
+}
+
+
+
+function startArchive() {
+
+  if (!folders.archiveSource) {
+    alert('Choisis le dossier source.');
+    return;
+  }
+
+  if (!folders.archiveDestination) {
+    alert('Choisis le dossier destination.');
+    return;
+  }
+
+  if (!confirm(
+    'Archiver les fichiers anciens ?\n\nLes fichiers seront déplacés, pas supprimés.'
+  )) {
+    return;
+  }
+
+  setStatus('Démarrage de l’archivage...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerArchivageV9({
+      sourceId: folders.archiveSource.id,
+      destinationId: folders.archiveDestination.id,
+      recursive: document.getElementById('archiveRecursive').checked,
+      olderThanDays: document.getElementById('archiveDays').value
+    });
+}
+
+
+function getRenameOptions() {
+  return {
+    sourceId: folders.renameSource ? folders.renameSource.id : '',
+    recursive: document.getElementById('renameRecursive').checked,
+    prefix: document.getElementById('renamePrefix').value,
+    suffix: document.getElementById('renameSuffix').value,
+    searchText: document.getElementById('renameSearch').value,
+    replaceText: document.getElementById('renameReplace').value,
+    extensions: document.getElementById('renameExtensions').value
+  };
+}
+
+
+function previewRename() {
+
+  setStatus('Création de l’aperçu de renommage...');
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+        setStatus(
+          'ERREUR : ' +
+          ((r && r.error) || 'Erreur inconnue')
+        );
+        return;
+      }
+
+      setStatus(
+        'Aperçu renommage : ' +
+        r.matched +
+        ' fichier(s) à renommer parmi ' +
+        r.scanned +
+        ' analysé(s).\nFeuille : ' +
+        r.sheetName +
+        (r.limited ? '\nAperçu volontairement limité.' : '')
+      );
+
+    })
+    .withFailureHandler(showError)
+    .apercuRenommageV9(getRenameOptions());
+}
+
+
+function startRename() {
+
+  if (!folders.renameSource) {
+    alert('Choisis le dossier source.');
+    return;
+  }
+
+  if (!confirm(
+    'Renommer réellement les fichiers correspondants ?\n\nJe conseille de lancer APERÇU RENOMMAGE avant.'
+  )) {
+    return;
+  }
+
+  setStatus('Démarrage du renommage en masse...');
+
+  google.script.run
+    .withSuccessHandler(handleStart)
+    .withFailureHandler(showError)
+    .demarrerRenommageV9(getRenameOptions());
+}
+
+
+function moveWholeFolder() {
+
+  if (!folders.folderMoveSource) {
+    alert('Choisis le dossier à déplacer.');
+    return;
+  }
+
+  if (!folders.folderMoveDestination) {
+    alert('Choisis le dossier destination.');
+    return;
+  }
+
+  if (!confirm(
+    'Déplacer le dossier complet "' +
+    folders.folderMoveSource.name +
+    '" dans "' +
+    folders.folderMoveDestination.name +
+    '" ?'
+  )) {
+    return;
+  }
+
+  setStatus('Déplacement du dossier complet...');
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+        setStatus(
+          'ERREUR : ' +
+          ((r && r.error) || 'Erreur inconnue')
+        );
+        return;
+      }
+
+      setStatus(r.message || 'Dossier déplacé.');
+
+    })
+    .withFailureHandler(showError)
+    .deplacerDossierCompletV9({
+      sourceId: folders.folderMoveSource.id,
+      destinationId: folders.folderMoveDestination.id
+    });
+}
+
+
+function handleStart(r) {
+
+  if (!r || r.ok === false) {
+
+    setStatus(
+      'ERREUR : ' +
+      (
+        (r && r.error) ||
+        'Erreur inconnue'
+      )
+    );
+
+    return;
+  }
+
+  let msg =
+    r.message || 'Travail démarré.';
+
+  if (r.statusSheetName) {
+    msg +=
+      '\nFeuille de suivi : ' +
+      r.statusSheetName;
+  }
+
+  setStatus(msg);
+
+  startPolling();
+}
+
+
+function refreshStatus() {
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+
+        setStatus(
+          'ERREUR : ' +
+          (
+            (r && r.error) ||
+            'Erreur inconnue'
+          )
+        );
+
+        return;
+      }
+
+      if (!r.exists) {
+        setStatus('Aucun travail V9 enregistré.');
+        return;
+      }
+
+      let msg =
+        'Type : ' + r.type +
+        '\nPhase : ' + r.phase +
+        '\nDossiers traités : ' + r.foldersDone +
+        '\nFichiers analysés : ' + r.scanned +
+        '\nCorrespondants : ' + r.matched +
+        '\nDéplacés / copiés : ' + r.acted +
+        '\nIgnorés : ' + r.skipped +
+        '\nErreurs : ' + r.errors;
+
+      if (r.statusSheetName) {
+        msg +=
+          '\nFeuille de suivi : ' +
+          r.statusSheetName;
+      }
+
+      if (r.lastError) {
+        msg +=
+          '\nDernière erreur : ' +
+          r.lastError;
+      }
+
+      if (r.triggerError) {
+        msg +=
+          '\nDéclencheur automatique : ' +
+          r.triggerError +
+          '\n→ Utilise "Continuer maintenant (1 lot)" dans le menu si nécessaire.';
+      }
+
+      setStatus(msg);
+
+      if (
+        r.phase === 'DONE' ||
+        r.phase === 'STOPPED' ||
+        r.phase === 'ERROR'
+      ) {
+        stopPolling();
+      }
+
+    })
+    .withFailureHandler(showError)
+    .getStatutV9();
+}
+
+
+function stopJob() {
+
+  if (!confirm(
+    'Arrêter le travail en cours ?\n\nLes opérations déjà effectuées restent en place.'
+  )) {
+    return;
+  }
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+
+        setStatus(
+          'ERREUR : ' +
+          (
+            (r && r.error) ||
+            'Erreur inconnue'
+          )
+        );
+
+        return;
+      }
+
+      setStatus(
+        r.message || 'Arrêté.'
+      );
+
+      stopPolling();
+
+    })
+    .withFailureHandler(showError)
+    .arreterJobV9();
+}
+
+
+function resumeJob() {
+
+  google.script.run
+    .withSuccessHandler(function(r) {
+
+      if (!r || r.ok === false) {
+
+        setStatus(
+          'ERREUR : ' +
+          (
+            (r && r.error) ||
+            'Erreur inconnue'
+          )
+        );
+
+        return;
+      }
+
+      setStatus(
+        r.message ||
+        'Reprise programmée.'
+      );
+
+      startPolling();
+
+    })
+    .withFailureHandler(showError)
+    .reprendreJobV9();
+}
+
+
+function startPolling() {
+
+  stopPolling();
+
+  pollTimer =
+    setInterval(
+      refreshStatus,
+      10000
+    );
+}
+
+
+function stopPolling() {
+
+  if (pollTimer) {
+
+    clearInterval(
+      pollTimer
+    );
+
+    pollTimer =
+      null;
+  }
+}
+
+
+function showError(e) {
+
+  let text =
+    'Erreur inconnue';
+
+  try {
+    text =
+      e && e.message
+        ? e.message
+        : String(e);
+  } catch (_) {}
+
+  setStatus(
+    'ERREUR TECHNIQUE : ' +
+    text +
+    '\n\nVérifie que tu as lancé une fois : GOOGLE DRIVE V9 → Autoriser / tester V9.'
+  );
+}
+
+
+init();
+
+</script>
+
+</body>
+</html>
