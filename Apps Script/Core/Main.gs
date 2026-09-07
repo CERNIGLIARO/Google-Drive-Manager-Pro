@@ -28,8 +28,6 @@
 'use strict';
 
 const GDM_MAIN_HTML_FILE = 'Dashboard';
-const GDM_DASHBOARD_WIDTH = 1400;
-const GDM_DASHBOARD_HEIGHT = 850;
 
 /**************************************************************************************************
  * MENU GOOGLE SHEETS
@@ -682,29 +680,48 @@ const GDM_Main = Object.freeze({
  * OUVRIR DASHBOARD
  **************************************************************************************************/
 function GDM_openDashboard() {
-  try {
-    var html = HtmlService
-      .createTemplateFromFile(GDM_MAIN_HTML_FILE)
-      .evaluate()
-      .setWidth(GDM_DASHBOARD_WIDTH)
-      .setHeight(GDM_DASHBOARD_HEIGHT)
-      .setTitle(GDM_APP.NAME);
+  var ui = SpreadsheetApp.getUi();
 
-    SpreadsheetApp
-      .getUi()
-      .showModalDialog(
-        html,
-        '🧰 ' + GDM_APP.NAME
-      );
+  try {
+    /*
+     * Dashboard.html ne contient pas de scriptlet Apps Script (<? ... ?>).
+     * createHtmlOutputFromFile() est donc plus simple et plus robuste que
+     * createTemplateFromFile(...).evaluate().
+     *
+     * IMPORTANT :
+     * Cette fonction d'ouverture ne dépend volontairement ni de GDM_APP
+     * ni de GDM_Utils. Ainsi, même si Config.gs ou Utils.gs est absent ou
+     * contient une erreur, le Dashboard peut quand même s'ouvrir et le
+     * message d'erreur reste lisible.
+     */
+    var html = HtmlService
+      .createHtmlOutputFromFile('Dashboard')
+      .setWidth(1400)
+      .setHeight(850);
+
+    ui.showModalDialog(
+      html,
+      '🧰 Google Drive Manager PRO'
+    );
+
   } catch (error) {
-    SpreadsheetApp
-      .getUi()
-      .alert(
-        'Google Drive Manager PRO',
-        'Impossible d’ouvrir le Dashboard.\n\n' +
-          GDM_Utils.getErrorMessage(error),
-        SpreadsheetApp.getUi().ButtonSet.OK
-      );
+    var message = 'Erreur inconnue.';
+
+    try {
+      if (error && error.message) {
+        message = String(error.message);
+      } else {
+        message = String(error);
+      }
+    } catch (ignored) {}
+
+    ui.alert(
+      'Google Drive Manager PRO',
+      'Impossible d’ouvrir le Dashboard.\n\n' +
+      'Détail : ' + message + '\n\n' +
+      'Vérifie surtout qu’un fichier HTML nommé exactement "Dashboard" existe dans Apps Script.',
+      ui.ButtonSet.OK
+    );
   }
 }
 
