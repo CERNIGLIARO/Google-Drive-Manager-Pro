@@ -1,18 +1,15 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Engine.gs
- * Version : 2.0.3
+ * Version : 2.0.2
  *
- * CORRECTION 2.0.3 - ANTI-BLOCAGE
- * --------------------------------
- * - corrige le blocage « Lot terminé. Reprise automatique en attente » ;
- * - si un déclencheur se lance pendant qu'un verrou moteur est encore actif,
- *   une nouvelle reprise est automatiquement reprogrammée ;
- * - récupère les tâches restées RUNNING après une interruption ;
- * - détecte et libère les verrous réellement périmés ;
- * - « Continuer maintenant » devient auto-réparant ;
- * - ajoute GDM_forceResumeCurrentJob() pour débloquer immédiatement un job coincé ;
- * - conserve pause, reprise, annulation, file, logs et modules existants.
+ * CORRECTION 2.0.2
+ * ----------------
+ * - corrige l'accumulation des déclencheurs GDM_engineTrigger ;
+ * - garantit qu'il n'existe jamais plus d'un déclencheur de reprise du moteur ;
+ * - supprime aussi les anciens déclencheurs orphelins sans mapping ;
+ * - réduit le risque de dépassement de durée Apps Script ;
+ * - conserve la reprise, la pause, l'annulation et la file existante.
  *
  * IMPORTANT
  * ---------
@@ -21,11 +18,10 @@
 'use strict';
 
 const GDM_Engine = Object.freeze({
+
   RUN_LOCK_PREFIX_: 'GDMV2_ENGINE_RUN_',
   SAFE_MAX_TASKS_PER_RUN_: 50,
   SAFE_HARD_RUNTIME_MS_: 180000,
-  BUSY_RETRY_DELAY_MS_: 10000,
-  STALE_TOKEN_AFTER_MS_: 240000,
 
   /************************************************************************************************
    * DÉMARRER
@@ -35,6 +31,7 @@ const GDM_Engine = Object.freeze({
     jobId = GDM_Utils.requireString(jobId, 'jobId');
 
     var state = GDM_State.require(jobId);
+
     if (
       state.status === GDM_JOB_STATUS.COMPLETED ||
       state.status === GDM_JOB_STATUS.CANCELLED ||
@@ -44,12 +41,7 @@ const GDM_Engine = Object.freeze({
     }
 
     GDM_State.setCurrentJobId(jobId);
-
-    try {
-      if (!this.hasActiveRunToken_(jobId)) {
-        GDM_Queue.resetRunningTasks(jobId);
-      }
-    } catch (ignoredReset) {}
+    GDM_Queue.resetRunningTasks(jobId);
 
     if (state.status === GDM_JOB_STATUS.PAUSED) {
       GDM_State.resume(jobId, 'Reprise du traitement.');
@@ -81,30 +73,11 @@ const GDM_Engine = Object.freeze({
     var token = this.acquireRunToken_(jobId);
 
     if (!token) {
-      var scheduled = false;
-
-      /*
-       * IMPORTANT 2.0.3 : auparavant, si le trigger arrivait ici pendant qu'un ancien
-       * verrou était encore présent, il mourait sans créer de nouvelle reprise.
-       * Le job restait alors bloqué indéfiniment.
-       */
-      try {
-        if (this.shouldAutoResume_(jobId)) {
-          var scheduleResult = this.scheduleResume(jobId, this.BUSY_RETRY_DELAY_MS_);
-          scheduled = scheduleResult.scheduled === true;
-        }
-      } catch (ignoredBusySchedule) {}
-
       return {
         ok: false,
         busy: true,
-        scheduled: scheduled,
         jobId: jobId,
-        message: scheduled
-          ? 'Moteur déjà occupé. Une nouvelle tentative a été programmée.'
-          : 'Ce job est déjà en cours d’exécution.',
-        state: GDM_State.getSummary(jobId),
-        queue: GDM_Queue.exists(jobId) ? GDM_Queue.getMeta(jobId) : null
+        message: 'Ce job est déjà en cours d’exécution.'
       };
     }
 
@@ -125,7 +98,6 @@ const GDM_Engine = Object.freeze({
     options = options || {};
 
     var runtime = GDM_Utils.createRuntimeContext();
-
     var configuredMaxTasks = GDM_Utils.toPositiveInteger(
       options.maxTasks,
       GDM_Config.get('RUNTIME.MAX_TASKS_PER_RUN', 250)
@@ -237,14 +209,14 @@ const GDM_Engine = Object.freeze({
       processedThisRun++;
 
       try {
-        try {
-          GDM_State.setCurrentItem(jobId, {
-            id: task.itemId || '',
-            name: task.itemName || '',
-            taskId: task.taskId || ''
-          });
-        } catch (ignoredCurrentItem) {}
+        GDM_State.setCurrentItem(jobId, {
+          id: task.itemId || '',
+          name: task.itemName || '',
+          taskId: task.taskId || ''
+        });
+      } catch (ignoredCurrentItem) {}
 
+      try {
         var moduleResult = this.executeTask_(task, {
           jobId: jobId,
           runtime: runtime,
@@ -349,7 +321,10 @@ const GDM_Engine = Object.freeze({
 
     var scheduled = false;
 
-    if (this.shouldAutoResume_(jobId)) {
+    if (
+      GDM_Config.get('QUEUE.AUTO_RESUME', true) &&
+      GDM_Config.get('TRIGGERS.ENABLED', true)
+    ) {
       var scheduleResult = this.scheduleResume(
         jobId,
         GDM_Config.get('QUEUE.AUTO_RESUME_DELAY_MS', 5000)
@@ -618,11 +593,7 @@ const GDM_Engine = Object.freeze({
       throw new Error('Ce job ne peut plus être repris.');
     }
 
-    if (!this.hasActiveRunToken_(jobId)) {
-      try {
-        GDM_Queue.resetRunningTasks(jobId);
-      } catch (ignoredReset) {}
-    }
+    GDM_Queue.resetRunningTasks(jobId);
 
     try {
       GDM_State.clearPauseRequest(jobId);
@@ -662,52 +633,12 @@ const GDM_Engine = Object.freeze({
   },
 
   /************************************************************************************************
-   * UN LOT MANUEL / BOUTON « CONTINUER MAINTENANT »
+   * UN LOT MANUEL
    *
-   * 2.0.3 : détecte un verrou périmé et récupère les tâches RUNNING avant de repartir.
+   * Limité volontairement pour éviter le dépassement de durée Apps Script.
    ************************************************************************************************/
   runOneBatch: function(jobId) {
     jobId = jobId || GDM_State.getCurrentJobId();
-    jobId = GDM_Utils.requireString(jobId, 'jobId');
-
-    var state = GDM_State.require(jobId);
-
-    if (
-      state.status === GDM_JOB_STATUS.COMPLETED ||
-      state.status === GDM_JOB_STATUS.CANCELLED ||
-      state.status === GDM_JOB_STATUS.ERROR
-    ) {
-      return this.buildRunResult_(jobId, 0, 'Job déjà terminé.');
-    }
-
-    if (this.hasActiveRunToken_(jobId)) {
-      if (this.isRunTokenStale_(jobId)) {
-        this.forceReleaseRunToken_(jobId);
-        try {
-          GDM_Queue.resetRunningTasks(jobId);
-        } catch (ignoredStaleReset) {}
-      } else {
-        var scheduled = false;
-        try {
-          scheduled = this.scheduleResume(jobId, this.BUSY_RETRY_DELAY_MS_).scheduled === true;
-        } catch (ignoredSchedule) {}
-
-        return {
-          ok: false,
-          busy: true,
-          scheduled: scheduled,
-          jobId: jobId,
-          message: 'Un lot est encore actif. Nouvelle tentative automatique programmée.',
-          state: GDM_State.getSummary(jobId),
-          queue: GDM_Queue.getMeta(jobId)
-        };
-      }
-    } else {
-      /* Aucun moteur actif : une tâche RUNNING ne peut être qu'orpheline. */
-      try {
-        GDM_Queue.resetRunningTasks(jobId);
-      } catch (ignoredReset) {}
-    }
 
     var configured = GDM_Utils.toPositiveInteger(
       GDM_Config.get('QUEUE.MAX_ITEMS_PER_BATCH', 250),
@@ -720,66 +651,10 @@ const GDM_Engine = Object.freeze({
   },
 
   /************************************************************************************************
-   * FORCER LA REPRISE D'UN JOB BLOQUÉ
-   *
-   * À utiliser uniquement lorsqu'un job est visiblement bloqué depuis plusieurs minutes.
-   ************************************************************************************************/
-  forceResume: function(jobId) {
-    jobId = jobId || GDM_State.getCurrentJobId();
-    jobId = GDM_Utils.requireString(jobId, 'jobId');
-
-    var state = GDM_State.require(jobId);
-
-    if (
-      state.status === GDM_JOB_STATUS.COMPLETED ||
-      state.status === GDM_JOB_STATUS.CANCELLED
-    ) {
-      return {
-        ok: true,
-        recovered: false,
-        completed: true,
-        jobId: jobId,
-        state: GDM_State.getSummary(jobId)
-      };
-    }
-
-    this.removeResumeTriggers(jobId);
-    this.forceReleaseRunToken_(jobId);
-
-    var reset = 0;
-    try {
-      reset = GDM_Queue.resetRunningTasks(jobId);
-    } catch (ignoredReset) {}
-
-    try {
-      GDM_State.clearPauseRequest(jobId);
-    } catch (ignoredPause) {}
-
-    try {
-      var latest = GDM_State.get(jobId);
-      if (latest && latest.status === GDM_JOB_STATUS.PAUSED) {
-        GDM_State.resume(jobId, 'Reprise forcée après blocage.');
-      } else if (latest && latest.status !== GDM_JOB_STATUS.RUNNING) {
-        GDM_State.start(jobId, 'Reprise forcée après blocage.');
-      }
-    } catch (ignoredState) {}
-
-    GDM_State.setCurrentJobId(jobId);
-
-    try {
-      GDM_State.checkpoint(jobId, {
-        message: 'Blocage récupéré. Reprise immédiate du traitement.'
-      });
-    } catch (ignoredCheckpoint) {}
-
-    var result = this.runOneBatch(jobId);
-    result.recovered = true;
-    result.resetRunningTasks = reset;
-    return result;
-  },
-
-  /************************************************************************************************
    * PLANIFIER UNE REPRISE
+   *
+   * FIX 2.0.2 : AVANT chaque création, tous les anciens triggers GDM_engineTrigger
+   * sont supprimés. Il ne peut donc plus y avoir 15 triggers accumulés.
    ************************************************************************************************/
   scheduleResume: function(jobId, delayMs) {
     jobId = GDM_Utils.requireString(jobId, 'jobId');
@@ -798,8 +673,7 @@ const GDM_Engine = Object.freeze({
       state.status === GDM_JOB_STATUS.COMPLETED ||
       state.status === GDM_JOB_STATUS.CANCELLED ||
       state.status === GDM_JOB_STATUS.ERROR ||
-      state.pauseRequested === true ||
-      state.status === GDM_JOB_STATUS.PAUSED
+      state.pauseRequested === true
     ) {
       return {
         ok: false,
@@ -816,7 +690,10 @@ const GDM_Engine = Object.freeze({
       )
     );
 
-    /* Un seul trigger moteur dans le projet. */
+    /*
+     * CORRECTION PRINCIPALE : un seul trigger moteur dans tout le projet.
+     * On supprime les anciens, même s'ils ont perdu leur mapping.
+     */
     this.removeAllEngineTriggers_();
     this.cleanupTriggerProperties_();
 
@@ -832,6 +709,7 @@ const GDM_Engine = Object.freeze({
       .create();
 
     var triggerId = '';
+
     try {
       triggerId = trigger.getUniqueId();
     } catch (ignoredId) {}
@@ -863,9 +741,6 @@ const GDM_Engine = Object.freeze({
 
   /************************************************************************************************
    * HANDLER TRIGGER
-   *
-   * 2.0.3 : si le moteur est encore occupé, NE PAS abandonner la reprise.
-   * Une nouvelle tentative est créée automatiquement.
    ************************************************************************************************/
   triggerRun: function(event) {
     event = event || {};
@@ -885,7 +760,11 @@ const GDM_Engine = Object.freeze({
       properties.deleteProperty(this.getTriggerPropertyKey_(triggerUid));
     }
 
-    /* Le trigger courant est consommé : nettoyer les restes avant la suite. */
+    /*
+     * Le déclencheur qui vient de s'exécuter peut encore apparaître dans la liste
+     * Apps Script comme déclencheur désactivé. On nettoie immédiatement tous les
+     * triggers du moteur avant de lancer le lot suivant.
+     */
     this.removeAllEngineTriggers_();
     this.cleanupTriggerProperties_();
 
@@ -919,33 +798,10 @@ const GDM_Engine = Object.freeze({
       return { ok: true, jobId: jobId, paused: true };
     }
 
-    if (this.hasActiveRunToken_(jobId)) {
-      if (this.isRunTokenStale_(jobId)) {
-        /* Verrou réellement orphelin. */
-        this.forceReleaseRunToken_(jobId);
-        try {
-          GDM_Queue.resetRunningTasks(jobId);
-        } catch (ignoredStaleReset) {}
-      } else {
-        /*
-         * Le précédent lot tourne encore : reprogrammer au lieu de perdre la chaîne
-         * de reprise. C'est la correction essentielle de la version 2.0.3.
-         */
-        var retry = this.scheduleResume(jobId, this.BUSY_RETRY_DELAY_MS_);
-        return {
-          ok: true,
-          busy: true,
-          scheduled: retry.scheduled === true,
-          jobId: jobId,
-          message: 'Moteur encore occupé. Reprise reprogrammée.'
-        };
-      }
-    } else {
-      /* Aucun lot actif : récupérer une éventuelle tâche orpheline RUNNING. */
-      try {
-        GDM_Queue.resetRunningTasks(jobId);
-      } catch (ignoredReset) {}
-    }
+    /* Récupération d'une éventuelle tâche restée RUNNING après timeout. */
+    try {
+      GDM_Queue.resetRunningTasks(jobId);
+    } catch (ignoredReset) {}
 
     return this.run(jobId, {
       maxTasks: this.SAFE_MAX_TASKS_PER_RUN_
@@ -954,6 +810,8 @@ const GDM_Engine = Object.freeze({
 
   /************************************************************************************************
    * SUPPRIMER LES TRIGGERS D'UN JOB
+   *
+   * FIX : un trigger moteur sans mapping est considéré comme orphelin et supprimé.
    ************************************************************************************************/
   removeResumeTriggers: function(jobId) {
     var handler = GDM_Config.get(
@@ -992,6 +850,12 @@ const GDM_Engine = Object.freeze({
         }
       }
 
+      /*
+       * - jobId vide : supprimer tous les triggers moteur ;
+       * - mapping vide : trigger orphelin, supprimer ;
+       * - mapping = jobId : supprimer ;
+       * - mapping d'un autre job : conserver.
+       */
       if (jobId && mappedJobId && mappedJobId !== jobId) {
         continue;
       }
@@ -1018,6 +882,8 @@ const GDM_Engine = Object.freeze({
 
   /************************************************************************************************
    * NETTOYER LES TRIGGERS ORPHELINS / DUPLIQUÉS
+   *
+   * Cette méthode est également appelée depuis Main.cleanup().
    ************************************************************************************************/
   cleanupOwnTriggers_: function() {
     var handler = GDM_Config.get(
@@ -1063,6 +929,7 @@ const GDM_Engine = Object.freeze({
         }
       }
 
+      /* Sans mapping = ancien trigger consommé/orphelin. */
       if (!mappedJobId) {
         try {
           ScriptApp.deleteTrigger(trigger);
@@ -1071,6 +938,7 @@ const GDM_Engine = Object.freeze({
         continue;
       }
 
+      /* Mapping vers un ancien job différent du job courant. */
       if (currentJobId && mappedJobId !== currentJobId) {
         try {
           ScriptApp.deleteTrigger(trigger);
@@ -1086,7 +954,7 @@ const GDM_Engine = Object.freeze({
       valid.push({ trigger: trigger, triggerId: triggerId });
     }
 
-    /* Un seul trigger valide doit subsister. */
+    /* S'il en reste plusieurs, un seul est conservé. */
     for (var v = 1; v < valid.length; v++) {
       try {
         ScriptApp.deleteTrigger(valid[v].trigger);
@@ -1181,8 +1049,6 @@ const GDM_Engine = Object.freeze({
       };
     }
 
-    this.removeResumeTriggers(jobId);
-
     var reset = GDM_Queue.resetRunningTasks(jobId);
     this.forceReleaseRunToken_(jobId);
     this.cleanupOwnTriggers_();
@@ -1230,45 +1096,9 @@ const GDM_Engine = Object.freeze({
       ),
       jobId: jobId,
       state: state,
-      queue: GDM_Queue.exists(jobId) ? GDM_Queue.getMeta(jobId) : null,
-      engineBusy: this.hasActiveRunToken_(jobId),
-      engineLock: this.getRunTokenInfo_(jobId)
+      queue: GDM_Queue.getMeta(jobId),
+      engineBusy: this.hasActiveRunToken_(jobId)
     };
-  },
-
-  /************************************************************************************************
-   * AUTO-REPRISE AUTORISÉE ?
-   ************************************************************************************************/
-  shouldAutoResume_: function(jobId) {
-    try {
-      if (!GDM_Config.get('QUEUE.AUTO_RESUME', true)) {
-        return false;
-      }
-
-      if (!GDM_Config.get('TRIGGERS.ENABLED', true)) {
-        return false;
-      }
-
-      var state = GDM_State.get(jobId);
-      if (!state) {
-        return false;
-      }
-
-      if (
-        state.status === GDM_JOB_STATUS.COMPLETED ||
-        state.status === GDM_JOB_STATUS.CANCELLED ||
-        state.status === GDM_JOB_STATUS.ERROR ||
-        state.status === GDM_JOB_STATUS.PAUSED ||
-        state.cancelRequested === true ||
-        state.pauseRequested === true
-      ) {
-        return false;
-      }
-
-      return GDM_Queue.exists(jobId) && !GDM_Queue.isDone(jobId);
-    } catch (ignored) {
-      return false;
-    }
   },
 
   /************************************************************************************************
@@ -1281,7 +1111,7 @@ const GDM_Engine = Object.freeze({
       processedThisRun: Number(processedThisRun || 0),
       message: GDM_Utils.toString(message),
       state: GDM_State.getSummary(jobId),
-      queue: GDM_Queue.exists(jobId) ? GDM_Queue.getMeta(jobId) : null
+      queue: GDM_Queue.getMeta(jobId)
     };
   },
 
@@ -1307,9 +1137,20 @@ const GDM_Engine = Object.freeze({
       });
     } catch (ignoredLog) {}
 
-    /* Une erreur technique ne doit pas casser définitivement la chaîne de reprise. */
+    /*
+     * Une erreur d'infrastructure ne condamne pas automatiquement le job.
+     * Si la queue contient encore du travail, une seule reprise est planifiée.
+     */
     try {
-      if (this.shouldAutoResume_(jobId)) {
+      var state = GDM_State.get(jobId);
+
+      if (
+        state &&
+        state.status === GDM_JOB_STATUS.RUNNING &&
+        GDM_Queue.hasPending(jobId) &&
+        state.cancelRequested !== true &&
+        state.pauseRequested !== true
+      ) {
         this.scheduleResume(
           jobId,
           GDM_Config.get('TRIGGERS.RESUME_DELAY_MS', 5000)
@@ -1334,21 +1175,15 @@ const GDM_Engine = Object.freeze({
 
       var now = Date.now();
 
-      if (existing) {
-        var expiresAt = Number(existing.expiresAt || 0);
-        var updatedAt = Number(existing.updatedAt || existing.createdAt || 0);
-        var stale = updatedAt > 0 && (now - updatedAt) > self.STALE_TOKEN_AFTER_MS_;
-
-        if (expiresAt > now && !stale) {
-          return null;
-        }
-
-        /* Verrou expiré ou manifestement orphelin. */
-        properties.deleteProperty(key);
+      if (existing && Number(existing.expiresAt || 0) > now) {
+        return null;
       }
 
       var token = Utilities.getUuid();
-      var ttl = self.getRunTokenTtlMs_();
+      var ttl = GDM_Utils.toPositiveInteger(
+        GDM_Config.get('RUNTIME.MAX_EXECUTION_MS', 270000),
+        270000
+      ) + 120000;
 
       properties.setProperty(
         key,
@@ -1385,8 +1220,13 @@ const GDM_Engine = Object.freeze({
         }
 
         var now = Date.now();
+        var ttl = GDM_Utils.toPositiveInteger(
+          GDM_Config.get('RUNTIME.MAX_EXECUTION_MS', 270000),
+          270000
+        ) + 120000;
+
         existing.updatedAt = now;
-        existing.expiresAt = now + self.getRunTokenTtlMs_();
+        existing.expiresAt = now + ttl;
 
         properties.setProperty(key, JSON.stringify(existing));
         return true;
@@ -1394,27 +1234,6 @@ const GDM_Engine = Object.freeze({
     } catch (ignored) {
       return false;
     }
-  },
-
-  /************************************************************************************************
-   * DURÉE DE VIE DU VERROU
-   ************************************************************************************************/
-  getRunTokenTtlMs_: function() {
-    var configuredRuntime = GDM_Utils.toPositiveInteger(
-      GDM_Config.get('RUNTIME.MAX_EXECUTION_MS', 270000),
-      270000
-    );
-
-    var hardRuntime = Math.min(
-      configuredRuntime,
-      GDM_Utils.toPositiveInteger(
-        GDM_Config.get('RUNTIME.SAFE_HARD_RUNTIME_MS', this.SAFE_HARD_RUNTIME_MS_),
-        this.SAFE_HARD_RUNTIME_MS_
-      )
-    );
-
-    /* Marge suffisante sans laisser un verrou fantôme pendant 6-7 minutes. */
-    return Math.max(120000, hardRuntime + 60000);
   },
 
   /************************************************************************************************
@@ -1459,9 +1278,9 @@ const GDM_Engine = Object.freeze({
   },
 
   /************************************************************************************************
-   * INFO VERROU
+   * VERROU ACTIF ?
    ************************************************************************************************/
-  getRunTokenInfo_: function(jobId) {
+  hasActiveRunToken_: function(jobId) {
     try {
       var existing = GDM_Utils.safeJsonParse(
         PropertiesService
@@ -1471,53 +1290,10 @@ const GDM_Engine = Object.freeze({
       );
 
       if (!existing) {
-        return null;
-      }
-
-      return {
-        token: existing.token || '',
-        createdAt: Number(existing.createdAt || 0),
-        updatedAt: Number(existing.updatedAt || existing.createdAt || 0),
-        expiresAt: Number(existing.expiresAt || 0),
-        ageMs: Math.max(0, Date.now() - Number(existing.updatedAt || existing.createdAt || 0))
-      };
-    } catch (ignored) {
-      return null;
-    }
-  },
-
-  /************************************************************************************************
-   * VERROU PÉRIMÉ ?
-   ************************************************************************************************/
-  isRunTokenStale_: function(jobId) {
-    var info = this.getRunTokenInfo_(jobId);
-
-    if (!info) {
-      return false;
-    }
-
-    if (info.expiresAt > 0 && info.expiresAt <= Date.now()) {
-      return true;
-    }
-
-    return info.updatedAt > 0 && info.ageMs > this.STALE_TOKEN_AFTER_MS_;
-  },
-
-  /************************************************************************************************
-   * VERROU ACTIF ?
-   ************************************************************************************************/
-  hasActiveRunToken_: function(jobId) {
-    try {
-      var info = this.getRunTokenInfo_(jobId);
-
-      if (!info) {
         return false;
       }
 
-      if (
-        (info.expiresAt > 0 && info.expiresAt <= Date.now()) ||
-        (info.updatedAt > 0 && info.ageMs > this.STALE_TOKEN_AFTER_MS_)
-      ) {
+      if (Number(existing.expiresAt || 0) <= Date.now()) {
         this.forceReleaseRunToken_(jobId);
         return false;
       }
@@ -1533,9 +1309,7 @@ const GDM_Engine = Object.freeze({
    ************************************************************************************************/
   getModuleStatus: function() {
     return {
-      Explorer:
-        typeof GDM_Explorer !== 'undefined' &&
-        typeof GDM_Explorer.processTask === 'function',
+      Explorer: typeof GDM_Explorer !== 'undefined',
       Analysis:
         typeof GDM_Analysis !== 'undefined' &&
         typeof GDM_Analysis.processTask === 'function',
@@ -1584,25 +1358,20 @@ const GDM_Engine = Object.freeze({
       }
 
       var handler = GDM_Config.get('TRIGGERS.HANDLER_FUNCTION', '');
+
       if (handler !== 'GDM_engineTrigger') {
         errors.push('Handler trigger incorrect.');
       }
     } catch (error) {
-      try {
-        errors.push(GDM_Utils.getErrorMessage(error));
-      } catch (ignored) {
-        errors.push(String(error));
-      }
+      errors.push(GDM_Utils.getErrorMessage(error));
     }
 
     return {
       ok: errors.length === 0,
       file: 'Core/Engine.gs',
-      version: '2.0.3',
-      antiBlockingResume: true,
+      version: '2.0.2',
+      longScriptLock: false,
       singleResumeTrigger: true,
-      staleTokenRecovery: true,
-      forceResumeHelper: true,
       safeMaxTasksPerRun: this.SAFE_MAX_TASKS_PER_RUN_,
       safeHardRuntimeMs: this.SAFE_HARD_RUNTIME_MS_,
       modules: this.getModuleStatus(),
@@ -1620,38 +1389,16 @@ function GDM_engineTrigger(e) {
   } catch (error) {
     try {
       var jobId = GDM_State.getCurrentJobId();
+
       if (jobId) {
         GDM_Logger.error(error, {
           jobId: jobId,
           module: 'Engine',
           action: 'TRIGGER_RUN'
         });
-
-        /* Dernier filet de sécurité : tenter de recréer une reprise. */
-        try {
-          if (GDM_Engine.shouldAutoResume_(jobId)) {
-            GDM_Engine.scheduleResume(jobId, GDM_Engine.BUSY_RETRY_DELAY_MS_);
-          }
-        } catch (ignoredSchedule) {}
       }
     } catch (ignored) {}
 
     throw error;
   }
-}
-
-/**************************************************************************************************
- * OUTIL MANUEL DE DÉBLOCAGE
- *
- * Dans Apps Script : sélectionner GDM_forceResumeCurrentJob puis cliquer sur Exécuter.
- * Il reprend le job courant sans recommencer les tâches déjà terminées.
- **************************************************************************************************/
-function GDM_forceResumeCurrentJob() {
-  var jobId = GDM_State.getCurrentJobId();
-
-  if (!jobId) {
-    throw new Error('Aucun traitement en cours à débloquer.');
-  }
-
-  return GDM_Engine.forceResume(jobId);
 }
