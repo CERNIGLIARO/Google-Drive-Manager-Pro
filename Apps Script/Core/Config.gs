@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Config.gs
- * Version : 2.0.0
+ * Version : 2.1.0
  *
  * RÔLE
  * ----
@@ -27,9 +27,9 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.0.0',
+  VERSION: '2.1.0',
   MAJOR_VERSION: 2,
-  BUILD_DATE: '2026-09-06',
+  BUILD_DATE: '2026-09-20',
   ENVIRONMENT: 'production'
 });
 
@@ -300,6 +300,9 @@ const GDM_CONFIG = Object.freeze({
 
     MAX_ITEMS_PER_RUN: 5000,
 
+    // Conserver quelques analyses récentes au lieu d'effacer tout l'historique.
+    KEEP_RECENT_RESULTS: 1,
+
     INCLUDE_SUBFOLDERS_DEFAULT: true,
 
     DETECT_EMPTY_FOLDERS: true,
@@ -514,7 +517,9 @@ const GDM_CONFIG = Object.freeze({
 
     PROPERTY_CHUNK_SIZE: 7000,
 
-    MAX_CHUNKS: 100,
+    // 40 x 7 000 caractères ~= 280 Ko maximum par objet.
+    // Laisse une marge pour les autres données de PropertiesService.
+    MAX_CHUNKS: 40,
 
     AUTO_SAVE: true,
 

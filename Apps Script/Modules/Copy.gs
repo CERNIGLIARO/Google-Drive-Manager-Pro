@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Copy.gs
- * Version : 2.0.0
+ * Version : 2.1.0
  *
  * RÔLE
  * ----
@@ -55,6 +55,14 @@
 
 const GDM_Copy = Object.freeze({
 
+  PHASE_FILES_: 'FILES',
+
+  PHASE_FOLDERS_: 'FOLDERS',
+
+  MAX_SCAN_BATCH_SIZE_: 75,
+
+  TASK_SOFT_LIMIT_MS_: 40000,
+
 
   /************************************************************************************************
    * LANCER UNE COPIE
@@ -63,6 +71,10 @@ const GDM_Copy = Object.freeze({
   start: function(options) {
 
     options = options || {};
+
+    // Refuser immédiatement un second traitement avant toute création de dossier
+    // ou modification de stockage liée au nouveau job.
+    GDM_State.assertNoActiveJob_(options);
 
 
     /**********************************************************************************************
@@ -329,6 +341,11 @@ const GDM_Copy = Object.freeze({
     GDM_Queue.add(
       jobId,
       {
+        taskId:
+          'COPY_SCAN_' +
+          sourceFolderId +
+          '_FILES_0',
+
         module:
           GDM_MODULES.COPY,
 
@@ -352,6 +369,15 @@ const GDM_Copy = Object.freeze({
             recursive,
 
           depth:
+            0,
+
+          phase:
+            this.PHASE_FILES_,
+
+          continuationToken:
+            '',
+
+          scanPage:
             0
         }
       }
@@ -533,15 +559,49 @@ const GDM_Copy = Object.freeze({
     context
   ) {
 
-    var jobId =
-      task.jobId ||
-      context.jobId;
-
-
     var payload =
       task.payload ||
       {};
 
+    var phase =
+      GDM_Utils.trim(
+        payload.phase
+      ).toUpperCase() ||
+      this.PHASE_FILES_;
+
+    if (
+      phase ===
+      this.PHASE_FOLDERS_
+    ) {
+      return this.processFolderFoldersPhase_(
+        task,
+        context
+      );
+    }
+
+    return this.processFolderFilesPhase_(
+      task,
+      context
+    );
+  },
+
+
+  /************************************************************************************************
+   * FICHIERS DIRECTS PAR LOTS
+   ************************************************************************************************/
+
+  processFolderFilesPhase_: function(
+    task,
+    context
+  ) {
+
+    var jobId =
+      task.jobId ||
+      context.jobId;
+
+    var payload =
+      task.payload ||
+      {};
 
     var sourceFolderId =
       GDM_Utils.requireFolderId(
@@ -550,31 +610,21 @@ const GDM_Copy = Object.freeze({
         'sourceFolderId'
       );
 
-
     var destinationFolderId =
       GDM_Utils.requireFolderId(
         payload.destinationFolderId,
         'destinationFolderId'
       );
 
-
     var sourceFolder =
       DriveApp.getFolderById(
         sourceFolderId
       );
 
-
-    var destinationFolder =
-      DriveApp.getFolderById(
-        destinationFolderId
-      );
-
-
     var state =
       GDM_State.require(
         jobId
       );
-
 
     var recursive =
       typeof payload.recursive ===
@@ -589,36 +639,43 @@ const GDM_Copy = Object.freeze({
             true
           );
 
+    var iterator =
+      payload.continuationToken
+        ? DriveApp.continueFileIterator(
+            payload.continuationToken
+          )
+        : sourceFolder.getFiles();
 
-    var newTasks = [];
+    var batchSize =
+      this.getScanBatchSize_();
+
+    var startedAtMs =
+      Date.now();
 
     var directFiles = 0;
-
-    var directFolders = 0;
-
-    var foldersCreated = 0;
-
-
-    /**********************************************************************************************
-     * FICHIERS DIRECTS
-     **********************************************************************************************/
-
-    var files =
-      sourceFolder.getFiles();
-
+    var tasks = [];
 
     while (
-      files.hasNext()
+      directFiles < batchSize &&
+      (
+        Date.now() -
+        startedAtMs
+      ) < this.TASK_SOFT_LIMIT_MS_ &&
+      iterator.hasNext()
     ) {
 
       var file =
-        files.next();
-
+        iterator.next();
 
       directFiles++;
 
+      tasks.push({
+        taskId:
+          'COPY_FILE_' +
+          file.getId() +
+          '_' +
+          destinationFolderId,
 
-      newTasks.push({
         module:
           GDM_MODULES.COPY,
 
@@ -644,173 +701,425 @@ const GDM_Copy = Object.freeze({
       });
     }
 
-
-    /**********************************************************************************************
-     * SOUS-DOSSIERS
-     **********************************************************************************************/
-
-    if (recursive) {
-
-      var folders =
-        sourceFolder.getFolders();
-
-
-      while (
-        folders.hasNext()
-      ) {
-
-        var child =
-          folders.next();
-
-
-        directFolders++;
-
-
-        var childName =
-          this.buildUniqueFolderName_(
-            destinationFolder,
-            child.getName()
-          );
-
-
-        var newDestinationFolder =
-          destinationFolder.createFolder(
-            childName
-          );
-
-
-        foldersCreated++;
-
-
-        newTasks.push({
-          module:
-            GDM_MODULES.COPY,
-
-          action:
-            GDM_ACTIONS.COPY_FOLDER,
-
-          itemId:
-            child.getId(),
-
-          itemName:
-            child.getName(),
-
-          payload: {
-            sourceFolderId:
-              child.getId(),
-
-            destinationFolderId:
-              newDestinationFolder.getId(),
-
-            recursive:
-              true,
-
-            depth:
-              Math.max(
-                0,
-                GDM_Utils.toInteger(
-                  payload.depth,
-                  0
-                )
-              ) + 1
-          }
-        });
-      }
-    }
-
-
-    /**********************************************************************************************
-     * AJOUTER LES TÂCHES
-     **********************************************************************************************/
-
-    if (
-      newTasks.length
-    ) {
-
-      GDM_Queue.addInBatches(
-        jobId,
-        newTasks,
-        GDM_Config.get(
-          'QUEUE.MAX_ITEMS_PER_BATCH',
-          250
+    var scanPage =
+      Math.max(
+        0,
+        GDM_Utils.toInteger(
+          payload.scanPage,
+          0
         )
       );
 
+    if (
+      iterator.hasNext()
+    ) {
 
-      var current =
-        GDM_State.require(
-          jobId
-        );
+      tasks.push({
+        taskId:
+          'COPY_SCAN_' +
+          sourceFolderId +
+          '_FILES_' +
+          (scanPage + 1),
 
+        module:
+          GDM_MODULES.COPY,
 
-      GDM_State.setTotalKnown(
-        jobId,
-        Number(
-          current.totalKnown || 0
-        ) +
-        newTasks.length
-      );
+        action:
+          GDM_ACTIONS.COPY_FOLDER,
+
+        itemId:
+          sourceFolderId,
+
+        itemName:
+          sourceFolder.getName(),
+
+        payload: {
+          sourceFolderId:
+            sourceFolderId,
+
+          destinationFolderId:
+            destinationFolderId,
+
+          recursive:
+            recursive,
+
+          depth:
+            payload.depth,
+
+          phase:
+            this.PHASE_FILES_,
+
+          continuationToken:
+            iterator.getContinuationToken(),
+
+          scanPage:
+            scanPage + 1
+        }
+      });
+
+    } else if (recursive) {
+
+      tasks.push({
+        taskId:
+          'COPY_SCAN_' +
+          sourceFolderId +
+          '_FOLDERS_0',
+
+        module:
+          GDM_MODULES.COPY,
+
+        action:
+          GDM_ACTIONS.COPY_FOLDER,
+
+        itemId:
+          sourceFolderId,
+
+        itemName:
+          sourceFolder.getName(),
+
+        payload: {
+          sourceFolderId:
+            sourceFolderId,
+
+          destinationFolderId:
+            destinationFolderId,
+
+          recursive:
+            true,
+
+          depth:
+            payload.depth,
+
+          phase:
+            this.PHASE_FOLDERS_,
+
+          continuationToken:
+            '',
+
+          scanPage:
+            0
+        }
+      });
     }
 
+    var added =
+      this.addTasksAndIncreaseTotal_(
+        jobId,
+        tasks
+      );
 
-    /**********************************************************************************************
-     * STATISTIQUES
-     **********************************************************************************************/
+    return {
+      ok: true,
+      skipped: false,
+      message:
+        'Lot fichiers préparé pour copie : ' +
+        sourceFolder.getName(),
+      data: {
+        sourceFolderId: sourceFolderId,
+        destinationFolderId: destinationFolderId,
+        phase: this.PHASE_FILES_,
+        directFiles: directFiles,
+        tasksAdded: added
+      }
+    };
+  },
+
+
+  /************************************************************************************************
+   * SOUS-DOSSIERS PAR LOTS
+   ************************************************************************************************/
+
+  processFolderFoldersPhase_: function(
+    task,
+    context
+  ) {
+
+    var jobId =
+      task.jobId ||
+      context.jobId;
+
+    var payload =
+      task.payload ||
+      {};
+
+    var sourceFolderId =
+      GDM_Utils.requireFolderId(
+        payload.sourceFolderId ||
+        task.itemId,
+        'sourceFolderId'
+      );
+
+    var destinationFolderId =
+      GDM_Utils.requireFolderId(
+        payload.destinationFolderId,
+        'destinationFolderId'
+      );
+
+    var sourceFolder =
+      DriveApp.getFolderById(
+        sourceFolderId
+      );
+
+    var destinationFolder =
+      DriveApp.getFolderById(
+        destinationFolderId
+      );
+
+    var iterator =
+      payload.continuationToken
+        ? DriveApp.continueFolderIterator(
+            payload.continuationToken
+          )
+        : sourceFolder.getFolders();
+
+    var batchSize =
+      this.getScanBatchSize_();
+
+    var startedAtMs =
+      Date.now();
+
+    var directFolders = 0;
+    var foldersCreated = 0;
+    var tasks = [];
+
+    while (
+      directFolders < batchSize &&
+      (
+        Date.now() -
+        startedAtMs
+      ) < this.TASK_SOFT_LIMIT_MS_ &&
+      iterator.hasNext()
+    ) {
+
+      var child =
+        iterator.next();
+
+      directFolders++;
+
+      var childName =
+        this.buildUniqueFolderName_(
+          destinationFolder,
+          child.getName()
+        );
+
+      var newDestinationFolder =
+        destinationFolder.createFolder(
+          childName
+        );
+
+      foldersCreated++;
+
+      tasks.push({
+        taskId:
+          'COPY_SCAN_' +
+          child.getId() +
+          '_FILES_0',
+
+        module:
+          GDM_MODULES.COPY,
+
+        action:
+          GDM_ACTIONS.COPY_FOLDER,
+
+        itemId:
+          child.getId(),
+
+        itemName:
+          child.getName(),
+
+        payload: {
+          sourceFolderId:
+            child.getId(),
+
+          destinationFolderId:
+            newDestinationFolder.getId(),
+
+          recursive:
+            true,
+
+          depth:
+            Math.max(
+              0,
+              GDM_Utils.toInteger(
+                payload.depth,
+                0
+              )
+            ) + 1,
+
+          phase:
+            this.PHASE_FILES_,
+
+          continuationToken:
+            '',
+
+          scanPage:
+            0
+        }
+      });
+    }
+
+    var scanPage =
+      Math.max(
+        0,
+        GDM_Utils.toInteger(
+          payload.scanPage,
+          0
+        )
+      );
+
+    if (
+      iterator.hasNext()
+    ) {
+      tasks.push({
+        taskId:
+          'COPY_SCAN_' +
+          sourceFolderId +
+          '_FOLDERS_' +
+          (scanPage + 1),
+
+        module:
+          GDM_MODULES.COPY,
+
+        action:
+          GDM_ACTIONS.COPY_FOLDER,
+
+        itemId:
+          sourceFolderId,
+
+        itemName:
+          sourceFolder.getName(),
+
+        payload: {
+          sourceFolderId:
+            sourceFolderId,
+
+          destinationFolderId:
+            destinationFolderId,
+
+          recursive:
+            true,
+
+          depth:
+            payload.depth,
+
+          phase:
+            this.PHASE_FOLDERS_,
+
+          continuationToken:
+            iterator.getContinuationToken(),
+
+          scanPage:
+            scanPage + 1
+        }
+      });
+    }
+
+    var added =
+      this.addTasksAndIncreaseTotal_(
+        jobId,
+        tasks
+      );
 
     if (
       foldersCreated > 0
     ) {
-
       this.updateResult_(
         jobId,
         function(result) {
-
           result.foldersCreated =
             Number(
-              result.foldersCreated || 0
+              result.foldersCreated ||
+              0
             ) +
             foldersCreated;
 
-
           result.updatedAt =
             GDM_Utils.nowIso();
-
 
           return result;
         }
       );
     }
 
-
     return {
       ok: true,
-
       skipped: false,
-
       message:
-        'Dossier préparé pour copie : ' +
+        'Lot sous-dossiers préparé pour copie : ' +
         sourceFolder.getName(),
-
       data: {
-        sourceFolderId:
-          sourceFolderId,
-
-        destinationFolderId:
-          destinationFolderId,
-
-        directFiles:
-          directFiles,
-
-        directFolders:
-          directFolders,
-
-        foldersCreated:
-          foldersCreated,
-
-        tasksAdded:
-          newTasks.length
+        sourceFolderId: sourceFolderId,
+        destinationFolderId: destinationFolderId,
+        phase: this.PHASE_FOLDERS_,
+        directFolders: directFolders,
+        foldersCreated: foldersCreated,
+        tasksAdded: added
       }
     };
+  },
+
+
+  addTasksAndIncreaseTotal_: function(
+    jobId,
+    tasks
+  ) {
+
+    tasks =
+      GDM_Utils.ensureArray(
+        tasks
+      );
+
+    if (!tasks.length) {
+      return 0;
+    }
+
+    var added =
+      GDM_Queue.addInBatches(
+        jobId,
+        tasks,
+        GDM_Config.get(
+          'QUEUE.MAX_ITEMS_PER_BATCH',
+          250
+        )
+      );
+
+    if (!added.length) {
+      return 0;
+    }
+
+    var current =
+      GDM_State.require(
+        jobId
+      );
+
+    GDM_State.setTotalKnown(
+      jobId,
+      Number(
+        current.totalKnown ||
+        0
+      ) +
+      added.length
+    );
+
+    return added.length;
+  },
+
+
+  getScanBatchSize_: function() {
+
+    return Math.min(
+      this.MAX_SCAN_BATCH_SIZE_,
+      Math.max(
+        10,
+        GDM_Utils.toPositiveInteger(
+          GDM_Config.get(
+            'COPY.BATCH_SIZE',
+            75
+          ),
+          75
+        )
+      )
+    );
   },
 
 

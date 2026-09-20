@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Analysis.gs
- * Version : 2.3.0
+ * Version : 2.4.0
  *
  * STABILISATION "GROS DRIVE" / CONTINUATION TOKENS
  * --------------------------------------
@@ -13,7 +13,7 @@
  * - les listes détaillées sont limitées ;
  * - la taille JSON est automatiquement compactée avant sauvegarde ;
  * - les erreurs de lecture d'un fichier ou dossier sont isolées et n'arrêtent plus toute l'analyse ;
- * - les anciennes données Analysis stockées dans ScriptProperties sont nettoyées au démarrage ;
+ * - les anciennes données Analysis sont nettoyées intelligemment : le job actif et les analyses récentes sont conservés ;
  * - une fonction d'urgence permet de supprimer proprement un ancien job bloqué.
  *
  * IMPORTANT
@@ -52,11 +52,9 @@ const GDM_Analysis = Object.freeze({
 
     options = options || {};
 
-    // Nettoyage des anciens résultats Analysis afin de ne pas remplir le magasin de propriétés.
-    // Cela ne touche à AUCUN fichier Drive.
-    try {
-      this.cleanupAllAnalysisResultStorage_();
-    } catch (ignoredCleanup) {}
+    // Refuser immédiatement un second traitement avant toute création de dossier
+    // ou modification de stockage liée au nouveau job.
+    GDM_State.assertNoActiveJob_(options);
 
     var rootFolder = GDM_Utils.getFolderOrRoot(
       options.folderId ||
@@ -116,6 +114,21 @@ const GDM_Analysis = Object.freeze({
     });
 
     var jobId = state.jobId;
+
+    /*
+     * Le nettoyage intervient APRÈS la création du job.
+     * Ainsi, si un autre traitement est actif, State.create() refuse le nouveau job
+     * avant que l'on touche aux résultats d'analyse existants.
+     */
+    try {
+      this.cleanupAllAnalysisResultStorage_({
+        preserveCurrent: true,
+        keepRecent: GDM_Config.get(
+          'ANALYSIS.KEEP_RECENT_RESULTS',
+          1
+        )
+      });
+    } catch (ignoredCleanup) {}
 
     this.initializeResult_(jobId, {
       source: {
@@ -2131,7 +2144,33 @@ const GDM_Analysis = Object.freeze({
    *
    * Ne supprime aucun fichier Drive.
    ************************************************************************************************/
-  cleanupAllAnalysisResultStorage_: function() {
+  cleanupAllAnalysisResultStorage_: function(options) {
+
+    options = options || {};
+
+    var preserveCurrent =
+      GDM_Utils.toBoolean(
+        options.preserveCurrent,
+        false
+      );
+
+    var keepRecent =
+      Math.max(
+        0,
+        GDM_Utils.toInteger(
+          options.keepRecent,
+          0
+        )
+      );
+
+    var currentJobId = '';
+
+    if (preserveCurrent) {
+      try {
+        currentJobId =
+          GDM_State.getCurrentJobId() || '';
+      } catch (ignoredCurrent) {}
+    }
 
     var stores = [];
 
@@ -2149,6 +2188,7 @@ const GDM_Analysis = Object.freeze({
     } catch (ignoredScript) {}
 
     var totalDeleted = 0;
+    var preserved = {};
 
     for (
       var s = 0;
@@ -2159,6 +2199,7 @@ const GDM_Analysis = Object.freeze({
       var store = stores[s];
       var all = store.getProperties();
       var keys = Object.keys(all);
+      var groups = {};
 
       for (
         var i = 0;
@@ -2166,12 +2207,127 @@ const GDM_Analysis = Object.freeze({
         i++
       ) {
 
+        var key = keys[i];
+
         if (
-          keys[i].indexOf(
+          key.indexOf(
             this.RESULT_PREFIX_
-          ) === 0
+          ) !== 0
         ) {
-          store.deleteProperty(keys[i]);
+          continue;
+        }
+
+        var baseKey =
+          key
+            .replace(
+              /_PART_\d+$/,
+              ''
+            )
+            .replace(
+              /_META$/,
+              ''
+            );
+
+        if (!groups[baseKey]) {
+          groups[baseKey] = {
+            baseKey: baseKey,
+            keys: [],
+            updatedAt: ''
+          };
+        }
+
+        groups[baseKey].keys.push(key);
+
+        if (/_META$/.test(key)) {
+          var meta =
+            GDM_Utils.safeJsonParse(
+              all[key],
+              {}
+            );
+
+          groups[baseKey].updatedAt =
+            meta.updatedAt ||
+            groups[baseKey].updatedAt ||
+            '';
+        } else if (key === baseKey) {
+          var direct =
+            GDM_Utils.safeJsonParse(
+              all[key],
+              {}
+            );
+
+          groups[baseKey].updatedAt =
+            direct.updatedAt ||
+            direct.finishedAt ||
+            direct.startedAt ||
+            groups[baseKey].updatedAt ||
+            '';
+        }
+      }
+
+      var groupList =
+        Object.keys(groups)
+          .map(function(baseKey) {
+            return groups[baseKey];
+          })
+          .sort(function(a, b) {
+            return String(b.updatedAt || '')
+              .localeCompare(
+                String(a.updatedAt || '')
+              );
+          });
+
+      var keep = {};
+
+      if (currentJobId) {
+        keep[
+          this.RESULT_PREFIX_ +
+          currentJobId
+        ] = true;
+      }
+
+      var keptHistorical = 0;
+
+      for (
+        var g = 0;
+        g < groupList.length &&
+        keptHistorical < keepRecent;
+        g++
+      ) {
+
+        var candidate =
+          groupList[g].baseKey;
+
+        if (keep[candidate]) {
+          continue;
+        }
+
+        keep[candidate] = true;
+        keptHistorical++;
+      }
+
+      for (
+        var x = 0;
+        x < groupList.length;
+        x++
+      ) {
+
+        var group =
+          groupList[x];
+
+        if (keep[group.baseKey]) {
+          preserved[group.baseKey] = true;
+          continue;
+        }
+
+        for (
+          var k = 0;
+          k < group.keys.length;
+          k++
+        ) {
+          store.deleteProperty(
+            group.keys[k]
+          );
           totalDeleted++;
         }
       }
@@ -2179,7 +2335,11 @@ const GDM_Analysis = Object.freeze({
 
     return {
       ok: true,
-      deletedProperties: totalDeleted
+      deletedProperties: totalDeleted,
+      preservedResultGroups:
+        Object.keys(preserved).length,
+      keepRecent: keepRecent,
+      currentJobId: currentJobId
     };
   },
 
