@@ -2384,14 +2384,20 @@ const GDM_Rename = Object.freeze({
     }
 
 
-    GDM_Queue.addInBatches(
-      jobId,
-      tasks,
-      GDM_Config.get(
-        'QUEUE.MAX_ITEMS_PER_BATCH',
-        250
-      )
-    );
+    var added =
+      GDM_Queue.addInBatches(
+        jobId,
+        tasks,
+        GDM_Config.get(
+          'QUEUE.MAX_ITEMS_PER_BATCH',
+          250
+        )
+      );
+
+
+    if (!added.length) {
+      return 0;
+    }
 
 
     var state =
@@ -2405,11 +2411,11 @@ const GDM_Rename = Object.freeze({
       Number(
         state.totalKnown || 0
       ) +
-      tasks.length
+      added.length
     );
 
 
-    return tasks.length;
+    return added.length;
   },
 
 
