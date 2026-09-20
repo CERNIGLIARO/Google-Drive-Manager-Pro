@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/State.gs
- * Version : 2.0.0
+ * Version : 2.1.0
  *
  * RÔLE
  * ----
@@ -19,7 +19,8 @@
  * - résultats persistants ;
  * - stockage fractionné dans PropertiesService ;
  * - reprise après interruption Apps Script ;
- * - nettoyage des anciens jobs terminés.
+ * - nettoyage des anciens jobs terminés ;
+ * - protection globale : un seul job actif à la fois.
  *
  * DÉPENDANCES
  * -----------
@@ -75,6 +76,13 @@ const GDM_State = Object.freeze({
         'GDM_State.create : action obligatoire.'
       );
     }
+
+    /*
+     * PROTECTION 2.1.0
+     * Un seul traitement actif est autorisé. Cela empêche un nouveau job
+     * d'écraser CURRENT_JOB_ID et de casser la chaîne de reprise du précédent.
+     */
+    this.assertNoActiveJob_(options);
 
     var jobId = GDM_Utils.trim(
       options.jobId
@@ -175,9 +183,20 @@ const GDM_State = Object.freeze({
         true
       )
     ) {
-      this.setCurrentJobId(
-        jobId
-      );
+      try {
+        this.setCurrentJobId(
+          jobId
+        );
+      } catch (setCurrentError) {
+        /*
+         * Une course très rare entre deux créations simultanées peut laisser
+         * un état orphelin. On nettoie notre propre état avant de remonter l'erreur.
+         */
+        try {
+          this.delete(jobId);
+        } catch (ignoredCleanup) {}
+        throw setCurrentError;
+      }
     }
 
     try {
@@ -273,11 +292,62 @@ const GDM_State = Object.freeze({
    * JOB COURANT
    ************************************************************************************************/
 
-  setCurrentJobId: function(jobId) {
+  assertNoActiveJob_: function(options) {
+
+    options = options || {};
+
+    if (
+      GDM_Utils.toBoolean(
+        options.allowConcurrent,
+        false
+      )
+    ) {
+      return null;
+    }
+
+    var currentJobId =
+      this.getCurrentJobId();
+
+    if (!currentJobId) {
+      return null;
+    }
+
+    var current =
+      this.get(currentJobId);
+
+    if (!current) {
+      this.clearCurrentJobId(currentJobId);
+      return null;
+    }
+
+    if (
+      this.isTerminalStatus_(
+        current.status
+      )
+    ) {
+      this.clearCurrentJobId(currentJobId);
+      return null;
+    }
+
+    throw new Error(
+      'Un traitement est déjà actif (' +
+      GDM_Utils.toString(current.module) +
+      ' / ' +
+      GDM_Utils.toString(current.status) +
+      '). Job : ' +
+      currentJobId +
+      '. Attendez sa fin, mettez-le en pause/annulez-le ou utilisez la fonction de récupération avant de lancer un nouveau traitement.'
+    );
+  },
+
+
+  setCurrentJobId: function(jobId, options) {
 
     jobId = GDM_Utils.trim(
       jobId
     );
+
+    options = options || {};
 
     if (!jobId) {
       throw new Error(
@@ -285,17 +355,67 @@ const GDM_State = Object.freeze({
       );
     }
 
-    PropertiesService
-      .getScriptProperties()
-      .setProperty(
-        GDM_Config.get(
-          'STORAGE_KEYS.CURRENT_JOB_ID',
-          'GDMV2_CURRENT_JOB_ID'
-        ),
-        jobId
-      );
+    return GDM_Utils.withScriptLock(
+      function() {
 
-    return jobId;
+        var key =
+          GDM_Config.get(
+            'STORAGE_KEYS.CURRENT_JOB_ID',
+            'GDMV2_CURRENT_JOB_ID'
+          );
+
+        var properties =
+          PropertiesService
+            .getScriptProperties();
+
+        var currentJobId =
+          GDM_Utils.trim(
+            properties.getProperty(key)
+          );
+
+        if (
+          currentJobId &&
+          currentJobId !== jobId &&
+          !GDM_Utils.toBoolean(
+            options.force,
+            false
+          )
+        ) {
+
+          var current =
+            GDM_State.readState_(
+              currentJobId
+            );
+
+          if (
+            current &&
+            !GDM_State.isTerminalStatus_(
+              current.status
+            )
+          ) {
+            throw new Error(
+              'Impossible de changer le job courant : un autre traitement est encore actif (' +
+              GDM_Utils.toString(current.module) +
+              ' / ' +
+              GDM_Utils.toString(current.status) +
+              '). Job : ' +
+              currentJobId
+            );
+          }
+        }
+
+        properties.setProperty(
+          key,
+          jobId
+        );
+
+        return jobId;
+      },
+      GDM_Config.get(
+        'LOCK.STATE_LOCK_TIMEOUT_MS',
+        5000
+      )
+    );
   },
 
 
