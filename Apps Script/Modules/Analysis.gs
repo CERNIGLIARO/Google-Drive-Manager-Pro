@@ -125,7 +125,7 @@ const GDM_Analysis = Object.freeze({
         preserveCurrent: true,
         keepRecent: GDM_Config.get(
           'ANALYSIS.KEEP_RECENT_RESULTS',
-          3
+          1
         )
       });
     } catch (ignoredCleanup) {}
