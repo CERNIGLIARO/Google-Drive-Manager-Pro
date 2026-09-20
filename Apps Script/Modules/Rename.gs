@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Rename.gs
- * Version : 2.0.0
+ * Version : 2.1.0
  *
  * RÔLE
  * ----
@@ -76,6 +76,14 @@ const GDM_Rename = Object.freeze({
   OP_RENAME_FILE_: 'RENAME_FILE',
 
   OP_RENAME_FOLDER_: 'RENAME_FOLDER',
+
+  PHASE_FILES_: 'FILES',
+
+  PHASE_FOLDERS_: 'FOLDERS',
+
+  MAX_SCAN_BATCH_SIZE_: 100,
+
+  TASK_SOFT_LIMIT_MS_: 40000,
 
 
   /************************************************************************************************
@@ -200,6 +208,11 @@ const GDM_Rename = Object.freeze({
       jobId,
       {
 
+        taskId:
+          'RENAME_SCAN_' +
+          sourceFolderId +
+          '_FILES_0',
+
         module:
           GDM_MODULES.RENAME,
 
@@ -224,6 +237,15 @@ const GDM_Rename = Object.freeze({
             parameters.recursive,
 
           depth:
+            0,
+
+          phase:
+            this.PHASE_FILES_,
+
+          continuationToken:
+            '',
+
+          scanPage:
             0
         }
       }
@@ -685,15 +707,49 @@ const GDM_Rename = Object.freeze({
     context
   ) {
 
-    var jobId =
-      task.jobId ||
-      context.jobId;
-
-
     var payload =
       task.payload ||
       {};
 
+    var phase =
+      GDM_Utils.trim(
+        payload.phase
+      ).toUpperCase() ||
+      this.PHASE_FILES_;
+
+    if (
+      phase ===
+      this.PHASE_FOLDERS_
+    ) {
+      return this.processScanFolderFoldersPhase_(
+        task,
+        context
+      );
+    }
+
+    return this.processScanFolderFilesPhase_(
+      task,
+      context
+    );
+  },
+
+
+  /************************************************************************************************
+   * SCAN FICHIERS PAR LOTS
+   ************************************************************************************************/
+
+  processScanFolderFilesPhase_: function(
+    task,
+    context
+  ) {
+
+    var jobId =
+      task.jobId ||
+      context.jobId;
+
+    var payload =
+      task.payload ||
+      {};
 
     var folderId =
       GDM_Utils.requireFolderId(
@@ -702,18 +758,15 @@ const GDM_Rename = Object.freeze({
         'folderId'
       );
 
-
     var folder =
       DriveApp.getFolderById(
         folderId
       );
 
-
     var state =
       GDM_State.require(
         jobId
       );
-
 
     var parameters =
       this.normalizeOptions_(
@@ -721,50 +774,50 @@ const GDM_Rename = Object.freeze({
         {}
       );
 
-
     var result =
       this.readResult_(
         jobId
       );
 
-
     if (!result) {
-
       throw new Error(
         'Résultat Rename introuvable.'
       );
     }
 
-
     var tasks = [];
-
     var scannedFiles = 0;
-
-    var scannedFolders = 0;
-
-
-    /**********************************************************************************************
-     * FICHIERS
-     **********************************************************************************************/
 
     if (
       parameters.includeFiles
     ) {
 
-      var files =
-        folder.getFiles();
+      var iterator =
+        payload.continuationToken
+          ? DriveApp.continueFileIterator(
+              payload.continuationToken
+            )
+          : folder.getFiles();
 
+      var startedAtMs =
+        Date.now();
+
+      var batchSize =
+        this.getScanBatchSize_();
 
       while (
-        files.hasNext()
+        scannedFiles < batchSize &&
+        (
+          Date.now() -
+          startedAtMs
+        ) < this.TASK_SOFT_LIMIT_MS_ &&
+        iterator.hasNext()
       ) {
 
         var file =
-          files.next();
-
+          iterator.next();
 
         scannedFiles++;
-
 
         if (
           !this.matchesFile_(
@@ -772,17 +825,14 @@ const GDM_Rename = Object.freeze({
             parameters
           )
         ) {
-
           continue;
         }
-
 
         var sequence =
           Number(
             result.nextSequence ||
             parameters.numberStart
           );
-
 
         var newName =
           this.buildNewName_(
@@ -792,29 +842,26 @@ const GDM_Rename = Object.freeze({
             true
           );
 
-
         if (
           parameters.mode ===
           this.MODE_NUMBER_
         ) {
-
           result.nextSequence =
             sequence + 1;
         }
-
 
         if (
           file.getName() ===
           newName
         ) {
-
           result.counters.unchanged++;
-
           continue;
         }
 
-
         tasks.push({
+          taskId:
+            'RENAME_FILE_' +
+            file.getId(),
 
           module:
             GDM_MODULES.RENAME,
@@ -829,7 +876,6 @@ const GDM_Rename = Object.freeze({
             file.getName(),
 
           payload: {
-
             operation:
               this.OP_RENAME_FILE_,
 
@@ -847,37 +893,204 @@ const GDM_Rename = Object.freeze({
           }
         });
       }
+
+      var scanPage =
+        Math.max(
+          0,
+          GDM_Utils.toInteger(
+            payload.scanPage,
+            0
+          )
+        );
+
+      if (
+        iterator.hasNext()
+      ) {
+        tasks.push({
+          taskId:
+            'RENAME_SCAN_' +
+            folderId +
+            '_FILES_' +
+            (scanPage + 1),
+
+          module:
+            GDM_MODULES.RENAME,
+
+          action:
+            GDM_ACTIONS.RENAME_FILE,
+
+          itemId:
+            folderId,
+
+          itemName:
+            folder.getName(),
+
+          payload: {
+            operation:
+              this.OP_SCAN_FOLDER_,
+
+            folderId:
+              folderId,
+
+            recursive:
+              parameters.recursive,
+
+            depth:
+              payload.depth,
+
+            phase:
+              this.PHASE_FILES_,
+
+            continuationToken:
+              iterator.getContinuationToken(),
+
+            scanPage:
+              scanPage + 1
+          }
+        });
+
+      } else {
+        tasks.push(
+          this.buildFolderPhaseTask_(
+            folder,
+            payload,
+            parameters
+          )
+        );
+      }
+
+    } else {
+      tasks.push(
+        this.buildFolderPhaseTask_(
+          folder,
+          payload,
+          parameters
+        )
+      );
     }
 
+    result.counters.scannedFiles +=
+      scannedFiles;
 
-    /**********************************************************************************************
-     * SOUS-DOSSIERS
-     **********************************************************************************************/
+    result.updatedAt =
+      GDM_Utils.nowIso();
 
-    var folders =
-      folder.getFolders();
+    this.writeResult_(
+      jobId,
+      result
+    );
 
+    var added =
+      this.addTasksAndIncreaseTotal_(
+        jobId,
+        tasks
+      );
+
+    return {
+      ok: true,
+      skipped: false,
+      message:
+        'Lot fichiers analysé pour renommage : ' +
+        folder.getName(),
+      data: {
+        folderId: folderId,
+        phase: this.PHASE_FILES_,
+        scannedFiles: scannedFiles,
+        tasksAdded: added
+      }
+    };
+  },
+
+
+  /************************************************************************************************
+   * SCAN SOUS-DOSSIERS PAR LOTS
+   ************************************************************************************************/
+
+  processScanFolderFoldersPhase_: function(
+    task,
+    context
+  ) {
+
+    var jobId =
+      task.jobId ||
+      context.jobId;
+
+    var payload =
+      task.payload ||
+      {};
+
+    var folderId =
+      GDM_Utils.requireFolderId(
+        payload.folderId ||
+        task.itemId,
+        'folderId'
+      );
+
+    var folder =
+      DriveApp.getFolderById(
+        folderId
+      );
+
+    var state =
+      GDM_State.require(
+        jobId
+      );
+
+    var parameters =
+      this.normalizeOptions_(
+        state.parameters ||
+        {}
+      );
+
+    var result =
+      this.readResult_(
+        jobId
+      );
+
+    if (!result) {
+      throw new Error(
+        'Résultat Rename introuvable.'
+      );
+    }
+
+    var iterator =
+      payload.continuationToken
+        ? DriveApp.continueFolderIterator(
+            payload.continuationToken
+          )
+        : folder.getFolders();
+
+    var startedAtMs =
+      Date.now();
+
+    var batchSize =
+      this.getScanBatchSize_();
+
+    var tasks = [];
+    var scannedFolders = 0;
 
     while (
-      folders.hasNext()
+      scannedFolders < batchSize &&
+      (
+        Date.now() -
+        startedAtMs
+      ) < this.TASK_SOFT_LIMIT_MS_ &&
+      iterator.hasNext()
     ) {
 
       var child =
-        folders.next();
-
+        iterator.next();
 
       scannedFolders++;
 
-
-      /*
-       * Le scan du sous-dossier est ajouté avant son éventuel renommage.
-       * L'identifiant Drive reste stable même si son nom change ensuite.
-       */
       if (
         parameters.recursive
       ) {
-
         tasks.push({
+          taskId:
+            'RENAME_SCAN_' +
+            child.getId() +
+            '_FILES_0',
 
           module:
             GDM_MODULES.RENAME,
@@ -892,7 +1105,6 @@ const GDM_Rename = Object.freeze({
             child.getName(),
 
           payload: {
-
             operation:
               this.OP_SCAN_FOLDER_,
 
@@ -909,11 +1121,19 @@ const GDM_Rename = Object.freeze({
                   payload.depth,
                   0
                 )
-              ) + 1
+              ) + 1,
+
+            phase:
+              this.PHASE_FILES_,
+
+            continuationToken:
+              '',
+
+            scanPage:
+              0
           }
         });
       }
-
 
       if (
         parameters.includeFolders
@@ -925,7 +1145,6 @@ const GDM_Rename = Object.freeze({
             parameters.numberStart
           );
 
-
         var newFolderName =
           this.buildNewName_(
             child.getName(),
@@ -934,29 +1153,26 @@ const GDM_Rename = Object.freeze({
             false
           );
 
-
         if (
           parameters.mode ===
           this.MODE_NUMBER_
         ) {
-
           result.nextSequence =
             folderSequence + 1;
         }
-
 
         if (
           child.getName() ===
           newFolderName
         ) {
-
           result.counters.unchanged++;
-
           continue;
         }
 
-
         tasks.push({
+          taskId:
+            'RENAME_FOLDER_' +
+            child.getId(),
 
           module:
             GDM_MODULES.RENAME,
@@ -971,7 +1187,6 @@ const GDM_Rename = Object.freeze({
             child.getName(),
 
           payload: {
-
             operation:
               this.OP_RENAME_FOLDER_,
 
@@ -991,66 +1206,160 @@ const GDM_Rename = Object.freeze({
       }
     }
 
+    var scanPage =
+      Math.max(
+        0,
+        GDM_Utils.toInteger(
+          payload.scanPage,
+          0
+        )
+      );
 
-    /**********************************************************************************************
-     * STATISTIQUES
-     **********************************************************************************************/
+    if (
+      iterator.hasNext()
+    ) {
+      tasks.push({
+        taskId:
+          'RENAME_SCAN_' +
+          folderId +
+          '_FOLDERS_' +
+          (scanPage + 1),
 
-    result.counters.scannedFiles +=
-      scannedFiles;
+        module:
+          GDM_MODULES.RENAME,
 
+        action:
+          GDM_ACTIONS.RENAME_FILE,
+
+        itemId:
+          folderId,
+
+        itemName:
+          folder.getName(),
+
+        payload: {
+          operation:
+            this.OP_SCAN_FOLDER_,
+
+          folderId:
+            folderId,
+
+          recursive:
+            parameters.recursive,
+
+          depth:
+            payload.depth,
+
+          phase:
+            this.PHASE_FOLDERS_,
+
+          continuationToken:
+            iterator.getContinuationToken(),
+
+          scanPage:
+            scanPage + 1
+        }
+      });
+    }
 
     result.counters.scannedFolders +=
       scannedFolders;
 
-
     result.updatedAt =
       GDM_Utils.nowIso();
-
 
     this.writeResult_(
       jobId,
       result
     );
 
-
-    /**********************************************************************************************
-     * QUEUE
-     **********************************************************************************************/
-
-    this.addTasksAndIncreaseTotal_(
-      jobId,
-      tasks
-    );
-
+    var added =
+      this.addTasksAndIncreaseTotal_(
+        jobId,
+        tasks
+      );
 
     return {
-
-      ok:
-        true,
-
-      skipped:
-        false,
-
+      ok: true,
+      skipped: false,
       message:
-        'Dossier analysé pour renommage : ' +
+        'Lot sous-dossiers analysé pour renommage : ' +
         folder.getName(),
-
       data: {
-
-        folderId:
-          folderId,
-
-        scannedFiles:
-          scannedFiles,
-
-        scannedFolders:
-          scannedFolders,
-
-        tasksAdded:
-          tasks.length
+        folderId: folderId,
+        phase: this.PHASE_FOLDERS_,
+        scannedFolders: scannedFolders,
+        tasksAdded: added
       }
     };
+  },
+
+
+  buildFolderPhaseTask_: function(
+    folder,
+    payload,
+    parameters
+  ) {
+
+    return {
+      taskId:
+        'RENAME_SCAN_' +
+        folder.getId() +
+        '_FOLDERS_0',
+
+      module:
+        GDM_MODULES.RENAME,
+
+      action:
+        GDM_ACTIONS.RENAME_FILE,
+
+      itemId:
+        folder.getId(),
+
+      itemName:
+        folder.getName(),
+
+      payload: {
+        operation:
+          this.OP_SCAN_FOLDER_,
+
+        folderId:
+          folder.getId(),
+
+        recursive:
+          parameters.recursive,
+
+        depth:
+          payload.depth,
+
+        phase:
+          this.PHASE_FOLDERS_,
+
+        continuationToken:
+          '',
+
+        scanPage:
+          0
+      }
+    };
+  },
+
+
+  getScanBatchSize_: function() {
+
+    return Math.min(
+      this.MAX_SCAN_BATCH_SIZE_,
+      Math.max(
+        10,
+        GDM_Utils.toPositiveInteger(
+          GDM_Config.get(
+            'RUNTIME.MAX_SCAN_ITEMS_PER_RUN',
+            100
+          ),
+          100
+        )
+      )
+    );
   },
 
 
