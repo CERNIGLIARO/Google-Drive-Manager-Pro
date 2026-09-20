@@ -949,7 +949,10 @@ const GDM_Rename = Object.freeze({
           }
         });
 
-      } else {
+      } else if (
+        parameters.recursive ||
+        parameters.includeFolders
+      ) {
         tasks.push(
           this.buildFolderPhaseTask_(
             folder,
@@ -959,7 +962,10 @@ const GDM_Rename = Object.freeze({
         );
       }
 
-    } else {
+    } else if (
+      parameters.recursive ||
+      parameters.includeFolders
+    ) {
       tasks.push(
         this.buildFolderPhaseTask_(
           folder,
