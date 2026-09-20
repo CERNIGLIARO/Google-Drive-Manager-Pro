@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Config.gs
- * Version : 2.0.0
+ * Version : 2.1.0
  *
  * RÔLE
  * ----
@@ -27,9 +27,9 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.0.0',
+  VERSION: '2.1.0',
   MAJOR_VERSION: 2,
-  BUILD_DATE: '2026-09-06',
+  BUILD_DATE: '2026-09-20',
   ENVIRONMENT: 'production'
 });
 
