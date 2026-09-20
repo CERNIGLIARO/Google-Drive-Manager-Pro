@@ -101,6 +101,10 @@ const GDM_Rename = Object.freeze({
 
     options = options || {};
 
+    // Refuser immédiatement un second traitement avant toute création de dossier
+    // ou modification de stockage liée au nouveau job.
+    GDM_State.assertNoActiveJob_(options);
+
 
     var sourceFolder =
       GDM_Utils.getFolderOrRoot(
