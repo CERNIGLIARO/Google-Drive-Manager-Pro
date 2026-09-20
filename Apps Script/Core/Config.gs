@@ -301,7 +301,7 @@ const GDM_CONFIG = Object.freeze({
     MAX_ITEMS_PER_RUN: 5000,
 
     // Conserver quelques analyses récentes au lieu d'effacer tout l'historique.
-    KEEP_RECENT_RESULTS: 3,
+    KEEP_RECENT_RESULTS: 1,
 
     INCLUDE_SUBFOLDERS_DEFAULT: true,
 
@@ -517,7 +517,9 @@ const GDM_CONFIG = Object.freeze({
 
     PROPERTY_CHUNK_SIZE: 7000,
 
-    MAX_CHUNKS: 100,
+    // 40 x 7 000 caractères ~= 280 Ko maximum par objet.
+    // Laisse une marge pour les autres données de PropertiesService.
+    MAX_CHUNKS: 40,
 
     AUTO_SAVE: true,
 
