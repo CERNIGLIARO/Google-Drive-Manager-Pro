@@ -52,6 +52,10 @@ const GDM_Analysis = Object.freeze({
 
     options = options || {};
 
+    // Refuser immédiatement un second traitement avant toute création de dossier
+    // ou modification de stockage liée au nouveau job.
+    GDM_State.assertNoActiveJob_(options);
+
     var rootFolder = GDM_Utils.getFolderOrRoot(
       options.folderId ||
       options.sourceFolderId ||
