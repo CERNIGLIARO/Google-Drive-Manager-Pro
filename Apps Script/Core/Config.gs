@@ -300,6 +300,9 @@ const GDM_CONFIG = Object.freeze({
 
     MAX_ITEMS_PER_RUN: 5000,
 
+    // Conserver quelques analyses récentes au lieu d'effacer tout l'historique.
+    KEEP_RECENT_RESULTS: 3,
+
     INCLUDE_SUBFOLDERS_DEFAULT: true,
 
     DETECT_EMPTY_FOLDERS: true,
