@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Config.gs
- * Version : 2.3.0
+ * Version : 2.6.1
  *
  * RÔLE
  * ----
@@ -27,7 +27,7 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.6.0',
+  VERSION: '2.6.1',
   MAJOR_VERSION: 2,
   BUILD_DATE: '2026-09-21',
   ENVIRONMENT: 'production'
@@ -312,11 +312,16 @@ const GDM_CONFIG = Object.freeze({
     // avant une seule sauvegarde résultat + queue.
     TURBO_MODE: true,
 
-    // Maximum de pages Drive API traitées dans une même tâche Analysis.
-    TURBO_MAX_PAGES_PER_TASK: 30,
+    // V2.6.1 : on garde beaucoup plus de travail en mémoire avant de persister.
+    // La limite temps reste prioritaire afin de ne jamais approcher le timeout Apps Script.
+    TURBO_MAX_PAGES_PER_TASK: 75,
 
     // Rend la main avant la limite de sécurité Apps Script.
-    TURBO_SOFT_LIMIT_MS: 30000,
+    TURBO_SOFT_LIMIT_MS: 35000,
+
+    // V2.6.1 : les dossiers restant à parcourir sont emballés dans UNE seule
+    // tâche de continuation, au lieu de créer des centaines d'entrées Queue.
+    TURBO_PACK_FRONTIER: true,
 
     // En cas d'indisponibilité temporaire de l'API avancée, l'ancien
     // moteur DriveApp reste utilisable automatiquement.
