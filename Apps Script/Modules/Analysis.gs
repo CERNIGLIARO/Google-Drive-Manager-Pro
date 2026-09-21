@@ -3087,8 +3087,11 @@ const GDM_Analysis = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Modules/Analysis.gs',
-      version: '2.3.0',
+      version: '2.5.0',
       readOnly: true,
+      fastAnalysis: true,
+      fastModeAvailable: this.shouldUseFastMode_(),
+      fastPageSize: this.getFastPageSize_(),
       antiStorageOverflow: true,
       resultStoreSeparated: true,
       continuationTokens: true,
@@ -3119,7 +3122,7 @@ function GDM_apiGetAnalysisResult(jobId) {
 
 
 /**************************************************************************************************
- * DIAGNOSTIC RAPIDE ANALYSIS 2.3
+ * DIAGNOSTIC RAPIDE ANALYSIS 2.5
  **************************************************************************************************/
 function GDM_analysisHealthCheck() {
 
@@ -3131,7 +3134,7 @@ function GDM_analysisHealthCheck() {
 
   return {
     ok: true,
-    version: '2.3.0',
+    version: '2.5.0',
     jobId: jobId,
     validation: GDM_Analysis.validate(),
     state: jobId ? GDM_State.getSummary(jobId) : null,
