@@ -610,15 +610,80 @@ const GDM_Search = Object.freeze({
     var stoppedByScanLimit = false;
     var stoppedByQueueLimit = false;
 
-    var queue = [
-      {
-        folder: rootFolder,
-        depth: 0,
-        includeFolderRow: false
-      }
-    ];
+    /*
+     * V2.2 : la recherche dans un dossier devient réellement reprenable.
+     * La file contient uniquement des identifiants et des tokens Drive sérialisables.
+     * Elle peut donc être renvoyée au navigateur puis réinjectée via options.resume.
+     */
+    var resume =
+      options.resume &&
+      typeof options.resume === 'object' &&
+      String(options.resume.scope || '').toUpperCase() === 'FOLDER'
+        ? options.resume
+        : null;
 
-    while (queue.length) {
+    var queue = [];
+
+    if (
+      resume &&
+      Array.isArray(resume.queue) &&
+      resume.queue.length
+    ) {
+      for (
+        var rq = 0;
+        rq < resume.queue.length;
+        rq++
+      ) {
+        var saved = resume.queue[rq] || {};
+
+        if (!saved.folderId) {
+          continue;
+        }
+
+        queue.push({
+          folderId: String(saved.folderId),
+          depth: Math.max(
+            0,
+            this.toPositiveInteger_(
+              Number(saved.depth) + 1,
+              1
+            ) - 1
+          ),
+          includeFolderRow:
+            saved.includeFolderRow === true,
+          stage:
+            this.normalizeString_(
+              saved.stage
+            ).toUpperCase() || 'ROW',
+          fileToken:
+            this.normalizeString_(
+              saved.fileToken
+            ),
+          folderToken:
+            this.normalizeString_(
+              saved.folderToken
+            )
+        });
+      }
+    }
+
+    if (!queue.length) {
+      queue.push({
+        folderId: rootFolder.getId(),
+        depth: 0,
+        includeFolderRow: false,
+        stage: 'ROW',
+        fileToken: '',
+        folderToken: ''
+      });
+    }
+
+    var stopAll = false;
+
+    while (
+      queue.length &&
+      !stopAll
+    ) {
       if (
         this.runtimeExpired_(
           startMs,
@@ -645,42 +710,107 @@ const GDM_Search = Object.freeze({
       }
 
       var current = queue.shift();
-      var folder = current.folder;
-      var depth = current.depth;
+      var folder;
 
-      if (
-        current.includeFolderRow &&
-        options.includeFolders
-      ) {
-        scannedFolders++;
+      try {
+        folder =
+          DriveApp.getFolderById(
+            current.folderId
+          );
+      } catch (folderError) {
+        /*
+         * Un dossier peut avoir été supprimé entre deux pages.
+         * On l'ignore afin de ne pas rendre toute la recherche inutilisable.
+         */
+        continue;
+      }
 
+      var depth =
+        Math.max(
+          0,
+          Number(current.depth || 0)
+        );
+
+      var stage =
+        this.normalizeString_(
+          current.stage
+        ).toUpperCase() ||
+        'ROW';
+
+      /********************************************************************************************
+       * LIGNE DU DOSSIER COURANT
+       ********************************************************************************************/
+      if (stage === 'ROW') {
         if (
-          this.matchesFolder_(
-            folder,
-            options
-          )
+          current.includeFolderRow &&
+          options.includeFolders
         ) {
-          matchedFolders++;
-          rows.push(
-            this.folderToRow_(
+          scannedFolders++;
+
+          if (
+            this.matchesFolder_(
               folder,
-              null,
               options
             )
-          );
-
-          if (rows.length >= options.limit) {
-            truncated = true;
-            break;
+          ) {
+            matchedFolders++;
+            rows.push(
+              this.folderToRow_(
+                folder,
+                null,
+                options
+              )
+            );
           }
+        }
+
+        stage = 'FILES';
+
+        if (
+          rows.length >= options.limit ||
+          scannedFiles + scannedFolders >=
+            options.maxScanned
+        ) {
+          current.stage = stage;
+          current.fileToken = '';
+          current.folderToken = '';
+          queue.unshift(current);
+          truncated = true;
+
+          if (
+            scannedFiles + scannedFolders >=
+            options.maxScanned
+          ) {
+            stoppedByScanLimit = true;
+          }
+
+          break;
         }
       }
 
       /********************************************************************************************
-       * FICHIERS DIRECTS
+       * FICHIERS DIRECTS DU DOSSIER COURANT
        ********************************************************************************************/
-      if (options.includeFiles) {
-        var files = folder.getFiles();
+      if (
+        stage === 'FILES' &&
+        options.includeFiles
+      ) {
+        var files;
+
+        if (current.fileToken) {
+          try {
+            files =
+              DriveApp.continueFileIterator(
+                current.fileToken
+              );
+          } catch (invalidFileToken) {
+            files =
+              folder.getFiles();
+          }
+        } else {
+          files =
+            folder.getFiles();
+        }
 
         while (files.hasNext()) {
           if (
@@ -708,7 +838,9 @@ const GDM_Search = Object.freeze({
             break;
           }
 
-          var file = files.next();
+          var file =
+            files.next();
+
           scannedFiles++;
 
           if (
@@ -721,6 +853,7 @@ const GDM_Search = Object.freeze({
           }
 
           matchedFiles++;
+
           rows.push(
             this.fileToRow_(
               file,
@@ -730,122 +863,228 @@ const GDM_Search = Object.freeze({
           );
         }
 
-        if (
-          stoppedByTime ||
-          stoppedByScanLimit ||
-          rows.length >= options.limit
-        ) {
-          break;
+        if (files.hasNext()) {
+          current.stage = 'FILES';
+          current.fileToken =
+            this.safeContinuationToken_(
+              files
+            );
+          current.folderToken = '';
+          queue.unshift(current);
+          stopAll = true;
+          continue;
         }
+
+        current.fileToken = '';
+        stage = 'FOLDERS';
+      } else if (stage === 'FILES') {
+        stage = 'FOLDERS';
       }
 
       /********************************************************************************************
        * SOUS-DOSSIERS
        ********************************************************************************************/
-      if (
-        options.recursive &&
-        depth < options.maxDepth
-      ) {
-        var folders = folder.getFolders();
-
-        while (folders.hasNext()) {
-          if (
-            this.runtimeExpired_(
-              startMs,
-              options.maxRuntimeMs
-            )
-          ) {
-            stoppedByTime = true;
-            truncated = true;
-            break;
-          }
-
-          if (
-            queue.length >=
-            this.MAX_FOLDER_QUEUE_
-          ) {
-            stoppedByQueueLimit = true;
-            truncated = true;
-            break;
-          }
-
-          var child = folders.next();
-
-          queue.push({
-            folder: child,
-            depth: depth + 1,
-            includeFolderRow: true
-          });
-        }
-
+      if (stage === 'FOLDERS') {
         if (
-          stoppedByTime ||
-          stoppedByQueueLimit
+          options.recursive &&
+          depth < options.maxDepth
         ) {
-          break;
-        }
-      } else if (
-        !options.recursive &&
-        options.includeFolders
-      ) {
-        var directFolders = folder.getFolders();
+          var folders;
 
-        while (directFolders.hasNext()) {
-          if (
-            this.runtimeExpired_(
-              startMs,
-              options.maxRuntimeMs
-            )
-          ) {
-            stoppedByTime = true;
-            truncated = true;
-            break;
+          if (current.folderToken) {
+            try {
+              folders =
+                DriveApp.continueFolderIterator(
+                  current.folderToken
+                );
+            } catch (invalidFolderToken) {
+              folders =
+                folder.getFolders();
+            }
+          } else {
+            folders =
+              folder.getFolders();
           }
 
-          if (
-            scannedFiles + scannedFolders >=
-            options.maxScanned
-          ) {
-            stoppedByScanLimit = true;
-            truncated = true;
-            break;
+          while (folders.hasNext()) {
+            if (
+              this.runtimeExpired_(
+                startMs,
+                options.maxRuntimeMs
+              )
+            ) {
+              stoppedByTime = true;
+              truncated = true;
+              break;
+            }
+
+            if (
+              queue.length >=
+              Math.max(
+                1,
+                this.MAX_FOLDER_QUEUE_ - 1
+              )
+            ) {
+              stoppedByQueueLimit = true;
+              truncated = true;
+              break;
+            }
+
+            var child =
+              folders.next();
+
+            queue.push({
+              folderId:
+                child.getId(),
+              depth:
+                depth + 1,
+              includeFolderRow:
+                true,
+              stage:
+                'ROW',
+              fileToken:
+                '',
+              folderToken:
+                ''
+            });
           }
 
-          if (rows.length >= options.limit) {
-            truncated = true;
-            break;
-          }
-
-          var directFolder =
-            directFolders.next();
-
-          scannedFolders++;
-
-          if (
-            !this.matchesFolder_(
-              directFolder,
-              options
-            )
-          ) {
+          if (folders.hasNext()) {
+            current.stage = 'FOLDERS';
+            current.fileToken = '';
+            current.folderToken =
+              this.safeContinuationToken_(
+                folders
+              );
+            queue.unshift(current);
+            stopAll = true;
             continue;
           }
 
-          matchedFolders++;
-          rows.push(
-            this.folderToRow_(
-              directFolder,
-              rootFolder,
-              options
-            )
-          );
-        }
+          current.folderToken = '';
+        } else if (
+          !options.recursive &&
+          options.includeFolders &&
+          depth === 0
+        ) {
+          /*
+           * Recherche non récursive :
+           * on retourne uniquement les sous-dossiers directs du dossier racine,
+           * sans descendre dans leur contenu.
+           */
+          var directFolders;
 
-        break;
+          if (current.folderToken) {
+            try {
+              directFolders =
+                DriveApp.continueFolderIterator(
+                  current.folderToken
+                );
+            } catch (invalidDirectFolderToken) {
+              directFolders =
+                folder.getFolders();
+            }
+          } else {
+            directFolders =
+              folder.getFolders();
+          }
+
+          while (directFolders.hasNext()) {
+            if (
+              this.runtimeExpired_(
+                startMs,
+                options.maxRuntimeMs
+              )
+            ) {
+              stoppedByTime = true;
+              truncated = true;
+              break;
+            }
+
+            if (
+              scannedFiles + scannedFolders >=
+              options.maxScanned
+            ) {
+              stoppedByScanLimit = true;
+              truncated = true;
+              break;
+            }
+
+            if (rows.length >= options.limit) {
+              truncated = true;
+              break;
+            }
+
+            var directFolder =
+              directFolders.next();
+
+            scannedFolders++;
+
+            if (
+              !this.matchesFolder_(
+                directFolder,
+                options
+              )
+            ) {
+              continue;
+            }
+
+            matchedFolders++;
+
+            rows.push(
+              this.folderToRow_(
+                directFolder,
+                rootFolder,
+                options
+              )
+            );
+          }
+
+          if (directFolders.hasNext()) {
+            current.stage = 'FOLDERS';
+            current.fileToken = '';
+            current.folderToken =
+              this.safeContinuationToken_(
+                directFolders
+              );
+            queue.unshift(current);
+            stopAll = true;
+            continue;
+          }
+        }
       }
     }
 
+    var continuation = null;
+
     if (queue.length) {
       truncated = true;
+
+      continuation = {
+        scope: 'FOLDER',
+        rootFolderId: rootFolder.getId(),
+        queue: queue.map(
+          function(entry) {
+            return {
+              folderId:
+                String(entry.folderId || ''),
+              depth:
+                Math.max(
+                  0,
+                  Number(entry.depth || 0)
+                ),
+              includeFolderRow:
+                entry.includeFolderRow === true,
+              stage:
+                String(entry.stage || 'ROW'),
+              fileToken:
+                String(entry.fileToken || ''),
+              folderToken:
+                String(entry.folderToken || '')
+            };
+          }
+        )
+      };
     }
 
     return {
@@ -867,7 +1106,7 @@ const GDM_Search = Object.freeze({
       stoppedByTime: stoppedByTime,
       stoppedByScanLimit: stoppedByScanLimit,
       stoppedByQueueLimit: stoppedByQueueLimit,
-      continuation: null,
+      continuation: continuation,
       rows: rows
     };
   },
