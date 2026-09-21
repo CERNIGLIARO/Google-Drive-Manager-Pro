@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/State.gs
- * Version : 2.2.0
+ * Version : 2.6.1
  *
  * RÔLE
  * ----
@@ -2718,6 +2718,11 @@ const GDM_State = Object.freeze({
 
           setCurrent:
             false,
+
+          // Le diagnostic State doit pouvoir s'exécuter pendant qu'un vrai job tourne.
+          // Le job de test n'est jamais rendu courant et est supprimé dans finally.
+          allowConcurrent:
+            true,
 
           parameters: {
             test: true
