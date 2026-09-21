@@ -76,6 +76,40 @@ const GDM_Main = Object.freeze({
   },
 
   initialize: function() {
+    var maintenance = {
+      cleanup: null,
+      removedOrphanTriggers: 0
+    };
+
+    if (
+      GDM_Config.get(
+        'STATE.AUTO_CLEANUP_ON_INITIALIZE',
+        true
+      )
+    ) {
+      try {
+        maintenance.cleanup =
+          GDM_State.cleanupOldJobs(
+            GDM_Config.get(
+              'STATE.CLEAN_COMPLETED_JOBS_AFTER_DAYS',
+              30
+            )
+          );
+      } catch (ignoredCleanup) {
+        maintenance.cleanup = {
+          ok: false,
+          message: GDM_Utils.getErrorMessage(
+            ignoredCleanup
+          )
+        };
+      }
+
+      try {
+        maintenance.removedOrphanTriggers =
+          GDM_Engine.cleanupOwnTriggers_();
+      } catch (ignoredTriggerCleanup) {}
+    }
+
     var currentJobId = GDM_State.getCurrentJobId();
     var state = null;
     var queue = null;
@@ -101,7 +135,8 @@ const GDM_Main = Object.freeze({
       currentJobId: currentJobId || '',
       state: state,
       queue: queue,
-      modules: GDM_Engine.getModuleStatus()
+      modules: GDM_Engine.getModuleStatus(),
+      maintenance: maintenance
     };
   },
 
