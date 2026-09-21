@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Config.gs
- * Version : 2.2.0
+ * Version : 2.3.0
  *
  * RÔLE
  * ----
@@ -27,7 +27,7 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.2.0',
+  VERSION: '2.3.0',
   MAJOR_VERSION: 2,
   BUILD_DATE: '2026-09-21',
   ENVIRONMENT: 'production'
@@ -299,6 +299,18 @@ const GDM_CONFIG = Object.freeze({
     BATCH_SIZE: 250,
 
     MAX_ITEMS_PER_RUN: 5000,
+
+    // V2.3 FAST ANALYSIS : lit les métadonnées par pages via Drive API v3
+    // au lieu d'effectuer plusieurs appels DriveApp pour chaque fichier.
+    FAST_MODE: true,
+
+    // 250 garde la queue compacte tout en analysant jusqu'à 250 éléments
+    // par requête réseau.
+    FAST_PAGE_SIZE: 250,
+
+    // En cas d'indisponibilité temporaire de l'API avancée, l'ancien
+    // moteur DriveApp reste utilisable automatiquement.
+    FAST_FALLBACK_TO_DRIVEAPP: true,
 
     // Conserver quelques analyses récentes au lieu d'effacer tout l'historique.
     KEEP_RECENT_RESULTS: 1,
