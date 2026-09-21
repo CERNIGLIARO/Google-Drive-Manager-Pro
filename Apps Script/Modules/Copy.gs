@@ -1182,7 +1182,8 @@ const GDM_Copy = Object.freeze({
       this.findMarkedFileCopy_(
         destinationFolder,
         fileId,
-        jobId
+        jobId,
+        file.getName()
       );
 
     var reusedExistingCopy =
@@ -1510,7 +1511,8 @@ const GDM_Copy = Object.freeze({
   findMarkedFileCopy_: function(
     destinationFolder,
     sourceFileId,
-    jobId
+    jobId,
+    sourceFileName
   ) {
     var marker =
       this.buildCopyMarker_(
@@ -1519,8 +1521,16 @@ const GDM_Copy = Object.freeze({
         'FILE'
       );
 
+    /*
+     * La copie conserve le nom source : getFilesByName évite de rescanner
+     * tout le dossier destination pour chaque fichier.
+     */
     var files =
-      destinationFolder.getFiles();
+      destinationFolder.getFilesByName(
+        GDM_Utils.toString(
+          sourceFileName
+        )
+      );
 
     while (files.hasNext()) {
       var file =
