@@ -63,6 +63,8 @@ const GDM_Copy = Object.freeze({
 
   TASK_SOFT_LIMIT_MS_: 40000,
 
+  COPY_MARKER_PREFIX_: 'GDM_COPY_V2',
+
 
   /************************************************************************************************
    * LANCER UNE COPIE
@@ -896,18 +898,19 @@ const GDM_Copy = Object.freeze({
 
       directFolders++;
 
-      var childName =
-        this.buildUniqueFolderName_(
+      var destinationInfo =
+        this.getOrCreateMarkedFolder_(
           destinationFolder,
-          child.getName()
+          child,
+          jobId
         );
 
       var newDestinationFolder =
-        destinationFolder.createFolder(
-          childName
-        );
+        destinationInfo.folder;
 
-      foldersCreated++;
+      if (destinationInfo.created) {
+        foldersCreated++;
+      }
 
       tasks.push({
         taskId:
@@ -1175,20 +1178,37 @@ const GDM_Copy = Object.freeze({
       );
 
 
-    var copy;
+    var copy =
+      this.findMarkedFileCopy_(
+        destinationFolder,
+        fileId,
+        jobId
+      );
+
+    var reusedExistingCopy =
+      Boolean(copy);
 
 
     try {
 
-      /*
-       * makeCopy conserve le contenu du fichier et crée un nouvel élément
-       * dans le dossier destination.
-       */
-      copy =
-        file.makeCopy(
-          file.getName(),
-          destinationFolder
+      if (!copy) {
+        /*
+         * makeCopy conserve le contenu du fichier et crée un nouvel élément
+         * dans le dossier destination.
+         */
+        copy =
+          file.makeCopy(
+            file.getName(),
+            destinationFolder
+          );
+
+        this.markCopiedItem_(
+          copy,
+          jobId,
+          fileId,
+          'FILE'
         );
+      }
 
     } catch (error) {
 
@@ -1223,30 +1243,32 @@ const GDM_Copy = Object.freeze({
      * STATISTIQUES
      **********************************************************************************************/
 
-    this.updateResult_(
-      jobId,
-      function(result) {
+    if (!reusedExistingCopy) {
+      this.updateResult_(
+        jobId,
+        function(result) {
 
-        result.filesCopied =
-          Number(
-            result.filesCopied || 0
-          ) + 1;
-
-
-        result.bytesCopied =
-          Number(
-            result.bytesCopied || 0
-          ) +
-          size;
+          result.filesCopied =
+            Number(
+              result.filesCopied || 0
+            ) + 1;
 
 
-        result.updatedAt =
-          GDM_Utils.nowIso();
+          result.bytesCopied =
+            Number(
+              result.bytesCopied || 0
+            ) +
+            size;
 
 
-        return result;
-      }
-    );
+          result.updatedAt =
+            GDM_Utils.nowIso();
+
+
+          return result;
+        }
+      );
+    }
 
 
     return {
@@ -1255,8 +1277,9 @@ const GDM_Copy = Object.freeze({
       skipped: false,
 
       message:
-        'Fichier copié : ' +
-        file.getName(),
+        reusedExistingCopy
+          ? 'Copie déjà créée lors d’une tentative précédente : ' + file.getName()
+          : 'Fichier copié : ' + file.getName(),
 
       data: {
         sourceFileId:
@@ -1354,6 +1377,166 @@ const GDM_Copy = Object.freeze({
         return result;
       }
     );
+  },
+
+
+  /************************************************************************************************
+   * MARQUEURS D'IDEMPOTENCE
+   *
+   * Les éléments créés par un job de copie reçoivent un marqueur dans leur description.
+   * Si Apps Script relance une tâche après une interruption, le module réutilise l'élément
+   * déjà créé au lieu de produire un doublon.
+   ************************************************************************************************/
+
+  buildCopyMarker_: function(
+    jobId,
+    sourceId,
+    kind
+  ) {
+    return (
+      this.COPY_MARKER_PREFIX_ +
+      '|JOB=' + GDM_Utils.trim(jobId) +
+      '|SOURCE=' + GDM_Utils.trim(sourceId) +
+      '|KIND=' + GDM_Utils.trim(kind)
+    );
+  },
+
+
+  markCopiedItem_: function(
+    item,
+    jobId,
+    sourceId,
+    kind
+  ) {
+    if (
+      !item ||
+      typeof item.setDescription !== 'function'
+    ) {
+      return false;
+    }
+
+    try {
+      item.setDescription(
+        this.buildCopyMarker_(
+          jobId,
+          sourceId,
+          kind
+        )
+      );
+      return true;
+    } catch (ignored) {
+      return false;
+    }
+  },
+
+
+  findMarkedFolder_: function(
+    parentFolder,
+    sourceFolderId,
+    jobId
+  ) {
+    var marker =
+      this.buildCopyMarker_(
+        jobId,
+        sourceFolderId,
+        'FOLDER'
+      );
+
+    var folders =
+      parentFolder.getFolders();
+
+    while (folders.hasNext()) {
+      var folder =
+        folders.next();
+
+      try {
+        if (
+          typeof folder.getDescription === 'function' &&
+          folder.getDescription() === marker
+        ) {
+          return folder;
+        }
+      } catch (ignored) {}
+    }
+
+    return null;
+  },
+
+
+  getOrCreateMarkedFolder_: function(
+    parentFolder,
+    sourceFolder,
+    jobId
+  ) {
+    var existing =
+      this.findMarkedFolder_(
+        parentFolder,
+        sourceFolder.getId(),
+        jobId
+      );
+
+    if (existing) {
+      return {
+        folder: existing,
+        created: false
+      };
+    }
+
+    var finalName =
+      this.buildUniqueFolderName_(
+        parentFolder,
+        sourceFolder.getName()
+      );
+
+    var created =
+      parentFolder.createFolder(
+        finalName
+      );
+
+    this.markCopiedItem_(
+      created,
+      jobId,
+      sourceFolder.getId(),
+      'FOLDER'
+    );
+
+    return {
+      folder: created,
+      created: true
+    };
+  },
+
+
+  findMarkedFileCopy_: function(
+    destinationFolder,
+    sourceFileId,
+    jobId
+  ) {
+    var marker =
+      this.buildCopyMarker_(
+        jobId,
+        sourceFileId,
+        'FILE'
+      );
+
+    var files =
+      destinationFolder.getFiles();
+
+    while (files.hasNext()) {
+      var file =
+        files.next();
+
+      try {
+        if (
+          typeof file.getDescription === 'function' &&
+          file.getDescription() === marker
+        ) {
+          return file;
+        }
+      } catch (ignored) {}
+    }
+
+    return null;
   },
 
 
