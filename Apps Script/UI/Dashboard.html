@@ -2212,6 +2212,14 @@ const UI = {
   pollingTimer:
     null,
 
+  // Reprise automatique côté interface :
+  // évite d'attendre le déclencheur Apps Script entre deux lots.
+  autoContinueBusy:
+    false,
+
+  autoContinueLastAt:
+    0,
+
   picker:
     {
 
@@ -3995,6 +4003,18 @@ async function refreshStatus(
     );
 
 
+    /*
+     * PERFORMANCE UI :
+     * si un job RUNNING a encore des tâches en attente mais aucune tâche en cours,
+     * on lance immédiatement le lot suivant depuis la fenêtre ouverte.
+     * Le trigger Apps Script reste présent comme filet de sécurité si l'interface est fermée.
+     */
+    maybeAutoContinue(
+      result.state,
+      result.queue
+    );
+
+
     if (
       loadLogs &&
       UI.currentJobId
@@ -4246,6 +4266,80 @@ function updateJobUI(
       status,
       ''
     );
+  }
+}
+
+
+/**************************************************************************************************
+ * REPRISE AUTOMATIQUE DES LOTS DEPUIS L'INTERFACE
+ **************************************************************************************************/
+
+async function maybeAutoContinue(
+  state,
+  queue
+) {
+
+  if (
+    UI.autoContinueBusy ||
+    !UI.currentJobId ||
+    !state ||
+    state.status !== 'RUNNING' ||
+    state.pauseRequested === true ||
+    state.cancelRequested === true ||
+    !queue ||
+    Number(queue.pending || 0) <= 0 ||
+    Number(queue.running || 0) > 0
+  ) {
+    return;
+  }
+
+
+  const now =
+    Date.now();
+
+
+  // Petit garde-fou anti double-clic / double-polling.
+  if (
+    now -
+    Number(UI.autoContinueLastAt || 0) <
+    4000
+  ) {
+    return;
+  }
+
+
+  UI.autoContinueBusy =
+    true;
+
+  UI.autoContinueLastAt =
+    now;
+
+
+  try {
+
+    await gsCall(
+      'GDM_apiContinueJob',
+      UI.currentJobId
+    );
+
+
+    // Le lot vient de finir : rafraîchir immédiatement les compteurs.
+    await refreshStatus(
+      false
+    );
+
+  } catch (error) {
+
+    // Ne pas bloquer l'interface : le trigger Apps Script reste le secours.
+    console.error(
+      'Reprise automatique du lot impossible :',
+      error
+    );
+
+  } finally {
+
+    UI.autoContinueBusy =
+      false;
   }
 }
 
