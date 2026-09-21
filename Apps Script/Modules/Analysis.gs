@@ -1,12 +1,13 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Analysis.gs
- * Version : 2.5.0
+ * Version : 2.6.0
  *
- * V2.5 - FAST ANALYSIS / DRIVE API v3
+ * V2.6 - TURBO FAST ANALYSIS / DRIVE API v3
  * --------------------------------------
  * Cette version conserve toutes les sécurités "gros Drive" et ajoute un moteur rapide :
- * - lecture des métadonnées par pages via Drive API v3 (jusqu'à 250 éléments par requête) ;
+ * - lecture des métadonnées par pages via Drive API v3 (jusqu'à 1000 éléments par requête) ;
+ * - mode Turbo : plusieurs dossiers/pages sont traités en mémoire avant une seule sauvegarde ;
  * - une page renvoie id, nom, type MIME, taille, date et parents en une seule requête ;
  * - repli automatique vers DriveApp si l'API avancée n'est pas disponible au démarrage ;
  * - l'ancien moteur DriveApp + continuationToken reste conservé comme secours ;
@@ -367,11 +368,14 @@ const GDM_Analysis = Object.freeze({
 
 
   /************************************************************************************************
-   * FAST ANALYSIS - DRIVE API V3
+   * FAST ANALYSIS TURBO - DRIVE API V3
    *
-   * Une seule requête renvoie jusqu'à FAST_PAGE_SIZE éléments avec leurs métadonnées.
-   * Les fichiers sont analysés directement depuis les objets JSON de l'API.
-   * Les dossiers enfants deviennent des tâches FAST séparées.
+   * V2.6 :
+   * - une page peut contenir jusqu'à 1000 éléments ;
+   * - plusieurs pages/dossiers sont traités dans la MEME tâche ;
+   * - résultat + queue ne sont sauvegardés qu'une seule fois à la fin du lot Turbo ;
+   * - les travaux restants sont remis en queue avec des taskId stables ;
+   * - le fallback DriveApp reste disponible dossier par dossier.
    ************************************************************************************************/
   processFastFolderPage_: function(
     jobId,
@@ -381,217 +385,239 @@ const GDM_Analysis = Object.freeze({
     result
   ) {
 
-    var folderId =
+    var initialFolderId =
       GDM_Utils.requireString(
         payload.folderId ||
         task.itemId,
         'folderId'
       );
 
-    var folderName =
+    var initialFolderName =
       GDM_Utils.toString(
         payload.folderName ||
         task.itemName ||
-        folderId
+        initialFolderId
       );
 
-    var pageToken =
-      GDM_Utils.toString(
-        payload.continuationToken ||
-        ''
-      );
-
-    var hasAnyFile =
-      payload.hasAnyFile === true;
-
-    var hasAnyFolder =
-      payload.hasAnyFolder === true;
-
-    if (
-      payload.folderCounted !== true
-    ) {
-      result.totals.folders++;
-      payload.folderCounted = true;
-    }
-
-    var response;
-
-    try {
-      var listOptions = {
-        q:
-          "'" +
-          folderId.replace(/'/g, "\\'") +
-          "' in parents and trashed = false",
-        pageSize:
-          this.getFastPageSize_(),
-        spaces:
-          'drive',
-        supportsAllDrives:
-          true,
-        includeItemsFromAllDrives:
-          true,
-        fields:
-          'nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails)'
-      };
-
-      if (pageToken) {
-        listOptions.pageToken =
-          pageToken;
-      }
-
-      response =
-        Drive.Files.list(
-          listOptions
-        );
-    } catch (fastError) {
-
-      /*
-       * Le repli n'est sûr que sur la première page : après une page FAST déjà
-       * comptabilisée, repartir depuis le début avec DriveApp doublerait les totaux.
-       */
-      if (
-        !pageToken &&
-        GDM_Config.get(
-          'ANALYSIS.FAST_FALLBACK_TO_DRIVEAPP',
-          true
-        )
-      ) {
-
-        try {
-          GDM_Logger.warn(
-            'FAST ANALYSIS indisponible. Repli DriveApp.',
-            {
-              jobId: jobId,
-              module: GDM_MODULES.ANALYSIS,
-              action: GDM_ACTIONS.ANALYZE_FOLDER,
-              itemId: folderId,
-              itemName: folderName,
-              data: {
-                error:
-                  GDM_Utils.getErrorMessage(
-                    fastError
-                  )
-              }
-            }
-          );
-        } catch (ignoredLog) {}
-
-        var fallbackTask =
-          this.buildScanTask_({
-            folderId:
-              folderId,
-            folderName:
-              folderName,
-            recursive:
-              recursive,
-            depth:
+    var workQueue = [
+      {
+        folderId:
+          initialFolderId,
+        folderName:
+          initialFolderName,
+        depth:
+          Math.max(
+            0,
+            GDM_Utils.toInteger(
               payload.depth,
-            phase:
-              this.PHASE_FILES_,
-            continuationToken:
-              '',
-            folderCounted:
-              true,
-            hasAnyFile:
-              hasAnyFile,
-            hasAnyFolder:
-              hasAnyFolder
-          });
-
-        result.updatedAt =
-          GDM_Utils.nowIso();
-
-        this.saveResultSafely_(
-          jobId,
-          result
-        );
-
-        var fallbackAdded =
-          this.addUniqueTasksAndIncreaseTotal_(
-            jobId,
-            [fallbackTask]
-          );
-
-        return {
-          ok: true,
-          skipped: false,
-          message:
-            'FAST ANALYSIS indisponible pour ' +
-            folderName +
-            '. Repli DriveApp planifié.',
-          data: {
-            folderId:
-              folderId,
-            fastMode:
-              false,
-            fallback:
-              true,
-            tasksAdded:
-              fallbackAdded
-          }
-        };
+              0
+            )
+          ),
+        pageToken:
+          GDM_Utils.toString(
+            payload.continuationToken ||
+            ''
+          ),
+        folderCounted:
+          payload.folderCounted === true,
+        hasAnyFile:
+          payload.hasAnyFile === true,
+        hasAnyFolder:
+          payload.hasAnyFolder === true
       }
+    ];
 
-      throw fastError;
-    }
+    var deferredTasks = [];
+    var maxPages =
+      this.getTurboMaxPages_();
 
-    var items =
-      response &&
-      Array.isArray(
-        response.files
-      )
-        ? response.files
-        : [];
+    var softLimitMs =
+      this.getTurboSoftLimitMs_();
 
-    var nextTasks = [];
+    var startedAtMs =
+      Date.now();
+
+    var processedPages = 0;
+    var newlyCountedFolders = 0;
     var scannedFiles = 0;
     var scannedFolders = 0;
+    var scannedItems = 0;
     var localErrors = 0;
+    var fallbacks = 0;
 
-    for (
-      var i = 0;
-      i < items.length;
-      i++
+    while (
+      workQueue.length &&
+      processedPages < maxPages &&
+      (
+        Date.now() -
+        startedAtMs
+      ) < softLimitMs
     ) {
 
-      var item =
-        items[i] ||
-        {};
-
-      var mimeType =
-        GDM_Utils.toString(
-          item.mimeType
-        );
+      var work =
+        workQueue.shift();
 
       if (
-        mimeType ===
-        GDM_MIME.FOLDER
+        !work.folderCounted
+      ) {
+        result.totals.folders++;
+        work.folderCounted = true;
+        newlyCountedFolders++;
+      }
+
+      var response;
+
+      try {
+
+        var listOptions = {
+          q:
+            "'" +
+            work.folderId +
+            "' in parents and trashed = false",
+          pageSize:
+            this.getFastPageSize_(),
+          spaces:
+            'drive',
+          supportsAllDrives:
+            true,
+          includeItemsFromAllDrives:
+            true,
+          fields:
+            'nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails)'
+        };
+
+        if (
+          work.pageToken
+        ) {
+          listOptions.pageToken =
+            work.pageToken;
+        }
+
+        response =
+          Drive.Files.list(
+            listOptions
+          );
+
+      } catch (fastError) {
+
+        /*
+         * Sur la première page du dossier, on peut basculer vers DriveApp
+         * sans doubler les compteurs. Les autres travaux Turbo continuent.
+         */
+        if (
+          !work.pageToken &&
+          GDM_Config.get(
+            'ANALYSIS.FAST_FALLBACK_TO_DRIVEAPP',
+            true
+          )
+        ) {
+
+          try {
+            GDM_Logger.warn(
+              'FAST ANALYSIS indisponible. Repli DriveApp.',
+              {
+                jobId:
+                  jobId,
+                module:
+                  GDM_MODULES.ANALYSIS,
+                action:
+                  GDM_ACTIONS.ANALYZE_FOLDER,
+                itemId:
+                  work.folderId,
+                itemName:
+                  work.folderName,
+                data: {
+                  error:
+                    GDM_Utils.getErrorMessage(
+                      fastError
+                    )
+                }
+              }
+            );
+          } catch (ignoredLog) {}
+
+          deferredTasks.push(
+            this.buildScanTask_({
+              folderId:
+                work.folderId,
+              folderName:
+                work.folderName,
+              recursive:
+                recursive,
+              depth:
+                work.depth,
+              phase:
+                this.PHASE_FILES_,
+              continuationToken:
+                '',
+              folderCounted:
+                true,
+              hasAnyFile:
+                work.hasAnyFile,
+              hasAnyFolder:
+                work.hasAnyFolder
+            })
+          );
+
+          fallbacks++;
+          continue;
+        }
+
+        /*
+         * Si l'erreur arrive sur une continuation, on laisse Engine réessayer
+         * la tâche originale. Aucun résultat Turbo n'a encore été persisté.
+         */
+        throw fastError;
+      }
+
+      processedPages++;
+
+      var items =
+        response &&
+        Array.isArray(
+          response.files
+        )
+          ? response.files
+          : [];
+
+      scannedItems +=
+        items.length;
+
+      for (
+        var i = 0;
+        i < items.length;
+        i++
       ) {
 
-        scannedFolders++;
-        hasAnyFolder = true;
+        var item =
+          items[i] ||
+          {};
 
-        if (recursive) {
-          nextTasks.push(
-            this.buildScanTask_({
+        var mimeType =
+          GDM_Utils.toString(
+            item.mimeType
+          );
+
+        if (
+          mimeType ===
+          GDM_MIME.FOLDER
+        ) {
+
+          scannedFolders++;
+          work.hasAnyFolder = true;
+
+          if (
+            recursive
+          ) {
+            workQueue.push({
               folderId:
                 item.id,
               folderName:
                 item.name ||
                 item.id,
-              recursive:
-                true,
               depth:
-                Math.max(
-                  0,
-                  GDM_Utils.toInteger(
-                    payload.depth,
-                    0
-                  )
-                ) + 1,
-              phase:
-                this.PHASE_FAST_,
-              continuationToken:
+                work.depth + 1,
+              pageToken:
                 '',
               folderCounted:
                 false,
@@ -599,158 +625,265 @@ const GDM_Analysis = Object.freeze({
                 false,
               hasAnyFolder:
                 false
-            })
-          );
+            });
+          }
+
+          continue;
         }
 
-        continue;
+        scannedFiles++;
+        work.hasAnyFile = true;
+
+        try {
+
+          this.analyzeFileMetadata_(
+            result,
+            item,
+            work.folderId,
+            work.folderName
+          );
+
+        } catch (fileError) {
+
+          this.addError_(
+            result,
+            fileError,
+            {
+              itemId:
+                item.id || '',
+              itemName:
+                item.name || '',
+              folderId:
+                work.folderId,
+              folderName:
+                work.folderName,
+              type:
+                'FAST_TURBO_FILE_ANALYSIS'
+            }
+          );
+
+          localErrors++;
+        }
       }
 
-      scannedFiles++;
-      hasAnyFile = true;
-
-      try {
-        this.analyzeFileMetadata_(
-          result,
-          item,
-          folderId,
-          folderName
-        );
-      } catch (fileError) {
-
-        this.addError_(
-          result,
-          fileError,
-          {
-            itemId:
-              item.id || '',
-            itemName:
-              item.name || '',
-            folderId:
-              folderId,
-            folderName:
-              folderName,
-            type:
-              'FAST_FILE_ANALYSIS'
-          }
+      var nextPageToken =
+        GDM_Utils.toString(
+          response &&
+          response.nextPageToken
+            ? response.nextPageToken
+            : ''
         );
 
-        localErrors++;
-      }
-    }
+      if (
+        nextPageToken
+      ) {
 
-    var nextPageToken =
-      GDM_Utils.toString(
-        response &&
-        response.nextPageToken
-          ? response.nextPageToken
-          : ''
-      );
-
-    if (nextPageToken) {
-      nextTasks.push(
-        this.buildScanTask_({
+        /*
+         * Priorité à la page suivante du même dossier.
+         * Cela termine un gros dossier avant de descendre dans ses enfants.
+         */
+        workQueue.unshift({
           folderId:
-            folderId,
+            work.folderId,
           folderName:
-            folderName,
-          recursive:
-            recursive,
+            work.folderName,
           depth:
-            payload.depth,
-          phase:
-            this.PHASE_FAST_,
-          continuationToken:
+            work.depth,
+          pageToken:
             nextPageToken,
           folderCounted:
             true,
           hasAnyFile:
-            hasAnyFile,
+            work.hasAnyFile,
           hasAnyFolder:
-            hasAnyFolder
-        })
-      );
-    } else if (
-      GDM_Config.get(
-        'ANALYSIS.DETECT_EMPTY_FOLDERS',
-        true
-      ) &&
-      !hasAnyFile &&
-      !hasAnyFolder
+            work.hasAnyFolder
+        });
+
+      } else if (
+        GDM_Config.get(
+          'ANALYSIS.DETECT_EMPTY_FOLDERS',
+          true
+        ) &&
+        !work.hasAnyFile &&
+        !work.hasAnyFolder
+      ) {
+
+        result.counters.emptyFolders++;
+
+        this.pushLimited_(
+          result.emptyFolders,
+          {
+            id:
+              work.folderId,
+            name:
+              work.folderName,
+            url:
+              GDM_Utils.getDriveFolderUrl(
+                work.folderId
+              )
+          },
+          this.getResultListLimit_(),
+          result.truncated,
+          'emptyFolders'
+        );
+      }
+    }
+
+    /*
+     * Tout ce qui n'a pas pu être traité dans ce lot Turbo
+     * est converti en tâches persistantes pour la reprise.
+     */
+    for (
+      var w = 0;
+      w < workQueue.length;
+      w++
     ) {
 
-      result.counters.emptyFolders++;
+      var pendingWork =
+        workQueue[w];
 
-      this.pushLimited_(
-        result.emptyFolders,
-        {
-          id:
-            folderId,
-          name:
-            folderName,
-          url:
-            GDM_Utils.getDriveFolderUrl(
-              folderId
-            )
-        },
-        this.getResultListLimit_(),
-        result.truncated,
-        'emptyFolders'
+      deferredTasks.push(
+        this.buildScanTask_({
+          folderId:
+            pendingWork.folderId,
+          folderName:
+            pendingWork.folderName,
+          recursive:
+            recursive,
+          depth:
+            pendingWork.depth,
+          phase:
+            this.PHASE_FAST_,
+          continuationToken:
+            pendingWork.pageToken,
+          folderCounted:
+            pendingWork.folderCounted,
+          hasAnyFile:
+            pendingWork.hasAnyFile,
+          hasAnyFolder:
+            pendingWork.hasAnyFolder
+        })
       );
     }
 
     result.updatedAt =
       GDM_Utils.nowIso();
 
+    /*
+     * POINT CLE TURBO :
+     * une seule sauvegarde du résultat pour tout le lot.
+     */
     this.saveResultSafely_(
       jobId,
       result
     );
 
+    /*
+     * Une seule phase d'ajout Queue pour tous les travaux restants.
+     */
     var added =
       this.addUniqueTasksAndIncreaseTotal_(
         jobId,
-        nextTasks
+        deferredTasks
       );
+
+    var elapsedMs =
+      Date.now() -
+      startedAtMs;
 
     return {
       ok: true,
       skipped: false,
       message:
-        'FAST ANALYSIS : ' +
-        folderName +
-        ' (' +
+        'TURBO : ' +
+        processedPages +
+        ' page(s), ' +
         scannedFiles +
         ' fichier(s), ' +
         scannedFolders +
-        ' dossier(s)' +
-        (nextPageToken
-          ? ', page suivante planifiée'
-          : '') +
-        ')',
+        ' sous-dossier(s) en ' +
+        Math.round(
+          elapsedMs /
+          100
+        ) /
+        10 +
+        ' s',
       data: {
         folderId:
-          folderId,
+          initialFolderId,
         phase:
           this.PHASE_FAST_,
         fastMode:
           true,
+        turboMode:
+          true,
+        pagesProcessed:
+          processedPages,
+        foldersCounted:
+          newlyCountedFolders,
         scanned:
-          items.length,
+          scannedItems,
         scannedFiles:
           scannedFiles,
         scannedFolders:
           scannedFolders,
         errors:
           localErrors,
-        continuation:
-          Boolean(
-            nextPageToken
-          ),
+        fallbacks:
+          fallbacks,
+        pendingWork:
+          workQueue.length,
         tasksAdded:
-          added
+          added,
+        elapsedMs:
+          elapsedMs
       }
     };
+  },
+
+
+  getTurboMaxPages_: function() {
+
+    if (
+      GDM_Config.get(
+        'ANALYSIS.TURBO_MODE',
+        true
+      ) !== true
+    ) {
+      return 1;
+    }
+
+    return Math.max(
+      1,
+      Math.min(
+        100,
+        GDM_Utils.toPositiveInteger(
+          GDM_Config.get(
+            'ANALYSIS.TURBO_MAX_PAGES_PER_TASK',
+            30
+          ),
+          30
+        )
+      )
+    );
+  },
+
+
+  getTurboSoftLimitMs_: function() {
+
+    return Math.max(
+      5000,
+      Math.min(
+        this.TASK_SOFT_LIMIT_MS_,
+        GDM_Utils.toPositiveInteger(
+          GDM_Config.get(
+            'ANALYSIS.TURBO_SOFT_LIMIT_MS',
+            30000
+          ),
+          30000
+        )
+      )
+    );
   },
 
 
@@ -3059,11 +3192,14 @@ const GDM_Analysis = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Modules/Analysis.gs',
-      version: '2.5.0',
+      version: '2.6.0',
       readOnly: true,
       fastAnalysis: true,
       fastModeAvailable: this.shouldUseFastMode_(),
       fastPageSize: this.getFastPageSize_(),
+      turboMode: GDM_Config.get('ANALYSIS.TURBO_MODE', true) === true,
+      turboMaxPagesPerTask: this.getTurboMaxPages_(),
+      turboSoftLimitMs: this.getTurboSoftLimitMs_(),
       antiStorageOverflow: true,
       resultStoreSeparated: true,
       continuationTokens: true,
@@ -3106,7 +3242,7 @@ function GDM_analysisHealthCheck() {
 
   return {
     ok: true,
-    version: '2.5.0',
+    version: '2.6.0',
     jobId: jobId,
     validation: GDM_Analysis.validate(),
     state: jobId ? GDM_State.getSummary(jobId) : null,
