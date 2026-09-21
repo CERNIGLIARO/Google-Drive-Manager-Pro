@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Main.gs
- * Version : 2.0.1
+ * Version : 2.2.0
  *
  * Point d'entrée principal de Google Drive Manager PRO V2.
  *
