@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
- * Fichier : Maintenance_Reset.gs
- * Version : 1.0.0
+ * Fichier : Core/Maintenance_Reset.gs
+ * Version : 2.2.0
  *
  * RESET TECHNIQUE COMPLET
  * -----------------------
@@ -373,4 +373,94 @@ function GDM_resetStoreStats_(store) {
     gdmCharsApprox: gdmChars,
     remainingGdmKeys: remainingGdmKeys
   };
+}
+
+
+/**************************************************************************************************
+ * DIAGNOSTIC GLOBAL GDM — LECTURE SEULE
+ * À utiliser si un traitement semble bloqué. Cette fonction ne modifie rien.
+ **************************************************************************************************/
+function GDM_DIAGNOSTIC_GLOBAL() {
+
+  var report = {
+    ok: true,
+    timestamp: new Date().toISOString(),
+    currentJobId: '',
+    state: null,
+    queue: null,
+    queueHealth: null,
+    engine: null,
+    analysis: null,
+    logger: null,
+    storage: null,
+    errors: []
+  };
+
+  try {
+    report.currentJobId =
+      typeof GDM_State !== 'undefined'
+        ? (GDM_State.getCurrentJobId() || '')
+        : '';
+  } catch (e1) {
+    report.errors.push('Current job : ' + String(e1));
+  }
+
+  if (report.currentJobId) {
+    try {
+      report.state = GDM_State.getSummary(report.currentJobId);
+    } catch (e2) {
+      report.errors.push('State : ' + String(e2));
+    }
+
+    try {
+      report.queue = GDM_Queue.getMeta(report.currentJobId);
+    } catch (e3) {
+      report.errors.push('Queue : ' + String(e3));
+    }
+  }
+
+  try {
+    if (typeof GDM_engineHealthCheck === 'function') {
+      report.engine = GDM_engineHealthCheck();
+    }
+  } catch (e4) {
+    report.errors.push('Engine diagnostic : ' + String(e4));
+  }
+
+  try {
+    if (typeof GDM_queueHealthCheck === 'function') {
+      report.queueHealth = GDM_queueHealthCheck();
+    }
+  } catch (e5) {
+    report.errors.push('Queue diagnostic : ' + String(e5));
+  }
+
+  try {
+    if (typeof GDM_analysisHealthCheck === 'function') {
+      report.analysis = GDM_analysisHealthCheck();
+    }
+  } catch (e6) {
+    report.errors.push('Analysis diagnostic : ' + String(e6));
+  }
+
+  try {
+    if (typeof GDM_loggerHealthCheck === 'function') {
+      report.logger = GDM_loggerHealthCheck();
+    }
+  } catch (e7) {
+    report.errors.push('Logger diagnostic : ' + String(e7));
+  }
+
+  try {
+    if (typeof GDM_DIAGNOSTIC_STOCKAGE === 'function') {
+      report.storage = GDM_DIAGNOSTIC_STOCKAGE();
+    }
+  } catch (e8) {
+    report.errors.push('Storage diagnostic : ' + String(e8));
+  }
+
+  report.ok = report.errors.length === 0;
+
+  console.log(JSON.stringify(report, null, 2));
+  return report;
 }

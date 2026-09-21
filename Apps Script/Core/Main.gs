@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Main.gs
- * Version : 2.0.1
+ * Version : 2.2.0
  *
  * Point d'entrée principal de Google Drive Manager PRO V2.
  *
@@ -76,6 +76,42 @@ const GDM_Main = Object.freeze({
   },
 
   initialize: function() {
+    var maintenance = {
+      cleanup: null,
+      removedOrphanTriggers: 0
+    };
+
+    if (
+      GDM_Config.get(
+        'STATE.AUTO_CLEANUP_ON_INITIALIZE',
+        true
+      )
+    ) {
+      try {
+        maintenance.cleanup =
+          this.cleanup({
+            completedJobsOlderThanDays:
+              GDM_Config.get(
+                'STATE.CLEAN_COMPLETED_JOBS_AFTER_DAYS',
+                30
+              )
+          });
+
+        maintenance.removedOrphanTriggers =
+          Number(
+            maintenance.cleanup.removedOrphanTriggers ||
+            0
+          );
+      } catch (ignoredCleanup) {
+        maintenance.cleanup = {
+          ok: false,
+          message: GDM_Utils.getErrorMessage(
+            ignoredCleanup
+          )
+        };
+      }
+    }
+
     var currentJobId = GDM_State.getCurrentJobId();
     var state = null;
     var queue = null;
@@ -101,7 +137,8 @@ const GDM_Main = Object.freeze({
       currentJobId: currentJobId || '',
       state: state,
       queue: queue,
-      modules: GDM_Engine.getModuleStatus()
+      modules: GDM_Engine.getModuleStatus(),
+      maintenance: maintenance
     };
   },
 
@@ -606,6 +643,54 @@ const GDM_Main = Object.freeze({
     );
 
     var stateCleanup = GDM_State.cleanupOldJobs(days);
+    var deletedJobIds =
+      stateCleanup && Array.isArray(stateCleanup.deleted)
+        ? stateCleanup.deleted
+        : [];
+
+    var queuesDeleted = 0;
+    var logsDeleted = 0;
+
+    /*
+     * State.cleanupOldJobs() supprime l'état et le résultat principal.
+     * Les queues et logs utilisent leurs propres stores : on les purge ici
+     * pour éviter une accumulation invisible dans PropertiesService.
+     */
+    for (
+      var i = 0;
+      i < deletedJobIds.length;
+      i++
+    ) {
+      var deletedJobId =
+        deletedJobIds[i];
+
+      try {
+        if (
+          typeof GDM_Queue !== 'undefined' &&
+          GDM_Queue &&
+          typeof GDM_Queue.delete === 'function'
+        ) {
+          GDM_Queue.delete(
+            deletedJobId
+          );
+          queuesDeleted++;
+        }
+      } catch (ignoredQueueCleanup) {}
+
+      try {
+        if (
+          typeof GDM_Logger !== 'undefined' &&
+          GDM_Logger &&
+          typeof GDM_Logger.clear === 'function'
+        ) {
+          GDM_Logger.clear(
+            deletedJobId
+          );
+          logsDeleted++;
+        }
+      } catch (ignoredLogCleanup) {}
+    }
+
     var removedTriggers = 0;
 
     try {
@@ -616,6 +701,8 @@ const GDM_Main = Object.freeze({
       ok: true,
       completedJobsOlderThanDays: days,
       stateCleanup: stateCleanup,
+      queuesDeleted: queuesDeleted,
+      logsDeleted: logsDeleted,
       removedOrphanTriggers: removedTriggers
     };
   },

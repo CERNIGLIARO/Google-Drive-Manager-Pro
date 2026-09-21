@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/State.gs
- * Version : 2.1.0
+ * Version : 2.2.0
  *
  * RÔLE
  * ----
@@ -328,6 +328,67 @@ const GDM_State = Object.freeze({
       this.clearCurrentJobId(currentJobId);
       return null;
     }
+
+    /*
+     * V2.2 - auto-réparation d'une initialisation interrompue.
+     * Si un état actif existe encore mais que sa queue a disparu depuis plusieurs minutes,
+     * le job ne pourra plus progresser. On le marque ERROR et on libère CURRENT_JOB_ID.
+     */
+    try {
+      var queueMissing =
+        typeof GDM_Queue !== 'undefined' &&
+        GDM_Queue &&
+        typeof GDM_Queue.exists === 'function' &&
+        !GDM_Queue.exists(
+          currentJobId
+        );
+
+      if (queueMissing) {
+        var createdAt =
+          GDM_Utils.toDate(
+            current.createdAt ||
+            current.updatedAt
+          );
+
+        var ageMs =
+          createdAt
+            ? Date.now() -
+              createdAt.getTime()
+            : 0;
+
+        var graceMs =
+          Math.max(
+            30000,
+            GDM_Utils.toInteger(
+              GDM_Config.get(
+                'STATE.ORPHAN_JOB_GRACE_MS',
+                180000
+              ),
+              180000
+            )
+          );
+
+        if (
+          ageMs >= graceMs
+        ) {
+          try {
+            this.fail(
+              currentJobId,
+              new Error(
+                'Queue technique introuvable après une initialisation interrompue.'
+              ),
+              'Job orphelin détecté et libéré automatiquement.'
+            );
+          } catch (ignoredFail) {
+            this.clearCurrentJobId(
+              currentJobId
+            );
+          }
+
+          return null;
+        }
+      }
+    } catch (ignoredOrphanCheck) {}
 
     throw new Error(
       'Un traitement est déjà actif (' +

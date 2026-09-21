@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/FolderTools.gs
- * Version : 2.0.0
+ * Version : 2.2.0
  *
  * RÔLE
  * ----
@@ -1330,22 +1330,123 @@ const GDM_FolderTools = Object.freeze({
       );
 
 
-    var pending = [
-      {
-        folder:
-          sourceFolder,
+    var maxRuntimeMs =
+      Math.min(
+        45000,
+        Math.max(
+          5000,
+          GDM_Utils.toPositiveInteger(
+            options.maxRuntimeMs,
+            40000
+          )
+        )
+      );
 
-        depth:
-          0
+
+    var startedAtMs =
+      Date.now();
+
+
+    var resume =
+      options.resume &&
+      typeof options.resume === 'object' &&
+      String(options.resume.scope || '').toUpperCase() === 'EMPTY_FOLDERS'
+        ? options.resume
+        : null;
+
+
+    var pending = [];
+
+    if (
+      resume &&
+      Array.isArray(resume.pending)
+    ) {
+      for (
+        var rp = 0;
+        rp < resume.pending.length;
+        rp++
+      ) {
+        var saved =
+          resume.pending[rp] ||
+          {};
+
+        if (!saved.folderId) {
+          continue;
+        }
+
+        pending.push({
+          folderId:
+            String(saved.folderId),
+          depth:
+            Math.max(
+              0,
+              Number(saved.depth || 0)
+            ),
+          counted:
+            saved.counted === true,
+          hasChild:
+            saved.hasChild === true,
+          folderToken:
+            String(saved.folderToken || '')
+        });
       }
-    ];
+    }
+
+
+    if (!pending.length) {
+      pending.push({
+        folderId:
+          sourceFolder.getId(),
+        depth:
+          0,
+        counted:
+          false,
+        hasChild:
+          false,
+        folderToken:
+          ''
+      });
+    }
 
 
     var emptyFolders = [];
 
-    var scanned = 0;
+    var scannedThisPage =
+      0;
 
-    var truncated = false;
+    var scannedTotal =
+      resume
+        ? Math.max(
+            0,
+            Number(
+              resume.scannedTotal ||
+              0
+            )
+          )
+        : 0;
+
+    var emptyTotal =
+      resume
+        ? Math.max(
+            0,
+            Number(
+              resume.emptyTotal ||
+              0
+            )
+          )
+        : 0;
+
+    var truncated =
+      false;
+
+    var stoppedByTime =
+      false;
+
+    var stoppedByScanLimit =
+      false;
+
+    var stoppedByResultLimit =
+      false;
 
 
     while (
@@ -1353,9 +1454,12 @@ const GDM_FolderTools = Object.freeze({
     ) {
 
       if (
-        scanned >=
-        maxFolders
+        Date.now() -
+          startedAtMs >=
+        maxRuntimeMs
       ) {
+        stoppedByTime =
+          true;
 
         truncated =
           true;
@@ -1365,9 +1469,25 @@ const GDM_FolderTools = Object.freeze({
 
 
       if (
-        emptyFolders.length >=
+        scannedTotal >=
+        maxFolders
+      ) {
+        stoppedByScanLimit =
+          true;
+
+        truncated =
+          true;
+
+        break;
+      }
+
+
+      if (
+        emptyTotal >=
         maxResults
       ) {
+        stoppedByResultLimit =
+          true;
 
         truncated =
           true;
@@ -1380,16 +1500,27 @@ const GDM_FolderTools = Object.freeze({
         pending.shift();
 
 
-      var current =
-        currentEntry.folder;
+      var current;
+
+      try {
+        current =
+          DriveApp.getFolderById(
+            currentEntry.folderId
+          );
+      } catch (missingFolder) {
+        continue;
+      }
 
 
-      scanned++;
+      if (
+        !currentEntry.counted
+      ) {
+        scannedThisPage++;
+        scannedTotal++;
+        currentEntry.counted =
+          true;
+      }
 
-
-      /********************************************************************************************
-       * TEST VIDE
-       ********************************************************************************************/
 
       var hasFile =
         current
@@ -1397,26 +1528,99 @@ const GDM_FolderTools = Object.freeze({
           .hasNext();
 
 
-      var foldersIterator =
-        current.getFolders();
+      var foldersIterator;
 
+      if (
+        currentEntry.folderToken
+      ) {
+        try {
+          foldersIterator =
+            DriveApp.continueFolderIterator(
+              currentEntry.folderToken
+            );
+        } catch (expiredFolderToken) {
+          /*
+           * Le token peut expirer après plusieurs minutes.
+           * On repart alors du dossier ; le tableau visited côté client
+           * n'est pas nécessaire car maxFolders borne l'opération.
+           */
+          foldersIterator =
+            current.getFolders();
 
-      var children = [];
+          currentEntry.hasChild =
+            false;
+        }
+      } else {
+        foldersIterator =
+          current.getFolders();
+      }
 
 
       while (
         foldersIterator.hasNext()
       ) {
 
-        children.push(
-          foldersIterator.next()
-        );
+        if (
+          Date.now() -
+            startedAtMs >=
+          maxRuntimeMs
+        ) {
+          stoppedByTime =
+            true;
+
+          truncated =
+            true;
+
+          break;
+        }
+
+
+        var child =
+          foldersIterator.next();
+
+
+        currentEntry.hasChild =
+          true;
+
+
+        if (recursive) {
+          pending.push({
+            folderId:
+              child.getId(),
+            depth:
+              currentEntry.depth + 1,
+            counted:
+              false,
+            hasChild:
+              false,
+            folderToken:
+              ''
+          });
+        }
       }
+
+
+      if (
+        foldersIterator.hasNext()
+      ) {
+        currentEntry.folderToken =
+          foldersIterator.getContinuationToken();
+
+        pending.unshift(
+          currentEntry
+        );
+
+        break;
+      }
+
+
+      currentEntry.folderToken =
+        '';
 
 
       var isEmpty =
         !hasFile &&
-        children.length === 0;
+        !currentEntry.hasChild;
 
 
       if (
@@ -1424,7 +1628,7 @@ const GDM_FolderTools = Object.freeze({
         (
           includeSource ||
           current.getId() !==
-          sourceFolder.getId()
+            sourceFolder.getId()
         )
       ) {
 
@@ -1451,32 +1655,52 @@ const GDM_FolderTools = Object.freeze({
               current.getId()
             )
         });
-      }
 
 
-      /********************************************************************************************
-       * DESCENTE
-       ********************************************************************************************/
+        emptyTotal++;
 
-      if (recursive) {
 
-        for (
-          var c = 0;
-          c < children.length;
-          c++
+        if (
+          emptyTotal >=
+          maxResults
         ) {
+          stoppedByResultLimit =
+            true;
 
-          pending.push({
+          truncated =
+            pending.length > 0;
 
-            folder:
-              children[c],
-
-            depth:
-              currentEntry.depth + 1
-          });
+          break;
         }
       }
+
+
+      if (!recursive) {
+        pending.length =
+          0;
+      }
     }
+
+
+    var continuation =
+      (
+        pending.length &&
+        !stoppedByScanLimit &&
+        !stoppedByResultLimit
+      )
+        ? {
+            scope:
+              'EMPTY_FOLDERS',
+            sourceFolderId:
+              sourceFolder.getId(),
+            scannedTotal:
+              scannedTotal,
+            emptyTotal:
+              emptyTotal,
+            pending:
+              pending
+          }
+        : null;
 
 
     return {
@@ -1499,13 +1723,32 @@ const GDM_FolderTools = Object.freeze({
         recursive,
 
       scannedFolders:
-        scanned,
+        scannedThisPage,
+
+      scannedFoldersTotal:
+        scannedTotal,
 
       emptyCount:
         emptyFolders.length,
 
+      emptyCountTotal:
+        emptyTotal,
+
       truncated:
-        truncated,
+        truncated ||
+        Boolean(continuation),
+
+      stoppedByTime:
+        stoppedByTime,
+
+      stoppedByScanLimit:
+        stoppedByScanLimit,
+
+      stoppedByResultLimit:
+        stoppedByResultLimit,
+
+      continuation:
+        continuation,
 
       folders:
         emptyFolders

@@ -2045,6 +2045,12 @@
             </button>
 
             <button
+              class="btn btn-secondary"
+              onclick="recoverJob()">
+              🛠 Récupérer
+            </button>
+
+            <button
               class="btn btn-danger"
               onclick="cancelJob()">
               ⛔ Annuler
@@ -3671,22 +3677,144 @@ async function renameFolderTool() {
 
 async function findEmptyFolders() {
 
-  await folderToolCall(
-    'FIND_EMPTY_FOLDERS',
-    {
-
-      folderId:
-        valueOf(
-          'emptyFolderId'
-        ),
-
-      recursive:
-        true,
-
-      limit:
-        5000
-    }
+  setLoading(
+    true
   );
+
+
+  try {
+
+    const folderId =
+      valueOf(
+        'emptyFolderId'
+      );
+
+
+    let resume =
+      null;
+
+    let page =
+      0;
+
+    let lastResult =
+      null;
+
+    const allFolders =
+      [];
+
+
+    do {
+
+      page++;
+
+
+      const result =
+        await gsCall(
+          'GDM_apiFolderTools',
+          'FIND_EMPTY_FOLDERS',
+          {
+
+            folderId:
+              folderId,
+
+            recursive:
+              true,
+
+            limit:
+              5000,
+
+            maxRuntimeMs:
+              35000,
+
+            resume:
+              resume
+          }
+        );
+
+
+      lastResult =
+        result ||
+        {};
+
+
+      if (
+        Array.isArray(
+          lastResult.folders
+        )
+      ) {
+
+        allFolders.push(
+          ...lastResult.folders
+        );
+      }
+
+
+      resume =
+        lastResult.continuation ||
+        null;
+
+
+      if (
+        page >= 100
+      ) {
+
+        throw new Error(
+          'La recherche a dépassé 100 lots. Relancez-la sur un dossier plus précis.'
+        );
+      }
+
+    } while (
+      resume
+    );
+
+
+    const finalResult =
+      Object.assign(
+        {},
+        lastResult || {},
+        {
+          folders:
+            allFolders,
+
+          emptyCount:
+            allFolders.length,
+
+          continuation:
+            null,
+
+          pages:
+            page
+        }
+      );
+
+
+    renderFolderToolResult(
+      finalResult
+    );
+
+
+    showToast(
+      'Recherche terminée : ' +
+      allFolders.length +
+      ' dossier(s) vide(s).',
+      'success'
+    );
+
+  } catch (error) {
+
+    showToast(
+      getErrorMessage(
+        error
+      ),
+      'error'
+    );
+
+  } finally {
+
+    setLoading(
+      false
+    );
+  }
 }
 
 
@@ -4216,6 +4344,39 @@ async function resumeJob() {
       false
     );
   }
+}
+
+
+async function recoverJob() {
+
+  if (
+    !UI.currentJobId
+  ) {
+
+    showToast(
+      'Aucun job courant.',
+      'error'
+    );
+
+    return;
+  }
+
+
+  if (
+    !confirm(
+      'Récupérer ce traitement ?\n\nCette action remet à zéro les tâches restées bloquées en cours et relance le job sans annuler les opérations déjà terminées.'
+    )
+  ) {
+
+    return;
+  }
+
+
+  await simpleJobAction(
+    'GDM_apiRecoverJob',
+    UI.currentJobId,
+    'Traitement récupéré et prêt à reprendre.'
+  );
 }
 
 
