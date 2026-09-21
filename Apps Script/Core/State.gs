@@ -1287,6 +1287,134 @@ const GDM_State = Object.freeze({
             );
         }
 
+        /*
+         * PERFORMANCE TELEMETRY 2.6 :
+         * réutilise la même écriture State déjà faite après chaque tâche.
+         * Aucune écriture PropertiesService supplémentaire n'est nécessaire.
+         */
+        if (
+          counters.telemetry &&
+          typeof counters.telemetry === 'object'
+        ) {
+
+          state.metadata =
+            state.metadata ||
+            {};
+
+          var previousTelemetry =
+            state.metadata.telemetry ||
+            {};
+
+          var incomingTelemetry =
+            counters.telemetry;
+
+          state.metadata.telemetry = {
+            turboMode:
+              incomingTelemetry.turboMode === true,
+
+            turboMaxPagesPerTask:
+              Math.max(
+                1,
+                Number(
+                  incomingTelemetry.turboMaxPagesPerTask ||
+                  previousTelemetry.turboMaxPagesPerTask ||
+                  1
+                )
+              ),
+
+            lastPages:
+              Math.max(
+                0,
+                Number(
+                  incomingTelemetry.pagesProcessed ||
+                  0
+                )
+              ),
+
+            lastFiles:
+              Math.max(
+                0,
+                Number(
+                  incomingTelemetry.scannedFiles ||
+                  0
+                )
+              ),
+
+            lastFolders:
+              Math.max(
+                0,
+                Number(
+                  incomingTelemetry.scannedFolders ||
+                  0
+                )
+              ),
+
+            lastElapsedMs:
+              Math.max(
+                0,
+                Number(
+                  incomingTelemetry.elapsedMs ||
+                  0
+                )
+              ),
+
+            cumulativePages:
+              Math.max(
+                0,
+                Number(
+                  previousTelemetry.cumulativePages ||
+                  0
+                ) +
+                Number(
+                  incomingTelemetry.pagesProcessed ||
+                  0
+                )
+              ),
+
+            cumulativeFiles:
+              Math.max(
+                0,
+                Number(
+                  previousTelemetry.cumulativeFiles ||
+                  0
+                ) +
+                Number(
+                  incomingTelemetry.scannedFiles ||
+                  0
+                )
+              ),
+
+            cumulativeFolders:
+              Math.max(
+                0,
+                Number(
+                  previousTelemetry.cumulativeFolders ||
+                  0
+                ) +
+                Number(
+                  incomingTelemetry.scannedFolders ||
+                  0
+                )
+              ),
+
+            cumulativeActiveMs:
+              Math.max(
+                0,
+                Number(
+                  previousTelemetry.cumulativeActiveMs ||
+                  0
+                ) +
+                Number(
+                  incomingTelemetry.elapsedMs ||
+                  0
+                )
+              ),
+
+            updatedAt:
+              GDM_Utils.nowIso()
+          };
+        }
+
         state.updatedAt =
           GDM_Utils.nowIso();
 
@@ -1613,7 +1741,15 @@ const GDM_State = Object.freeze({
         ),
 
       lastError:
-        state.lastError || null
+        state.lastError || null,
+
+      telemetry:
+        state.metadata &&
+        state.metadata.telemetry
+          ? this.makeSerializable_(
+              state.metadata.telemetry
+            )
+          : null
     };
   },
 
