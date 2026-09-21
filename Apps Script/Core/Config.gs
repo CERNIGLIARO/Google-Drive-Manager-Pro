@@ -27,7 +27,7 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.3.0',
+  VERSION: '2.6.0',
   MAJOR_VERSION: 2,
   BUILD_DATE: '2026-09-21',
   ENVIRONMENT: 'production'
@@ -307,6 +307,16 @@ const GDM_CONFIG = Object.freeze({
     // Mode rapide : jusqu'à 1000 éléments par requête Drive API v3.
     // Cela réduit fortement le nombre de pages et les sauvegardes intermédiaires.
     FAST_PAGE_SIZE: 1000,
+
+    // V2.6 TURBO : plusieurs pages/dossiers FAST sont traités en mémoire
+    // avant une seule sauvegarde résultat + queue.
+    TURBO_MODE: true,
+
+    // Maximum de pages Drive API traitées dans une même tâche Analysis.
+    TURBO_MAX_PAGES_PER_TASK: 30,
+
+    // Rend la main avant la limite de sécurité Apps Script.
+    TURBO_SOFT_LIMIT_MS: 30000,
 
     // En cas d'indisponibilité temporaire de l'API avancée, l'ancien
     // moteur DriveApp reste utilisable automatiquement.
