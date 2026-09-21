@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Engine.gs
- * Version : 2.1.0
+ * Version : 2.6.1
  *
  * STABILISATION 2.1.0 - ANTI-BLOCAGE + QUEUE
  * --------------------------------
@@ -1522,13 +1522,28 @@ const GDM_Engine = Object.freeze({
    * ERREUR MOTEUR
    ************************************************************************************************/
   handleRunError_: function(jobId, error) {
+    /*
+     * V2.6.1 :
+     * une erreur technique du moteur (verrou, trigger, stockage temporaire, etc.)
+     * ne doit PAS augmenter le compteur "Erreurs" de l'analyse.
+     * Ce compteur est réservé aux tâches métier définitivement en échec.
+     */
     try {
-      GDM_State.setLastError(
+      GDM_State.update(
         jobId,
-        GDM_Utils.errorToObject(error, {
-          module: 'Engine',
-          action: 'RUN'
-        })
+        {
+          lastError:
+            GDM_Utils.errorToObject(
+              error,
+              {
+                module: 'Engine',
+                action: 'RUN',
+                technical: true
+              }
+            ),
+          message:
+            'Incident technique moteur détecté. Reprise automatique en cours.'
+        }
       );
     } catch (ignoredState) {}
 
