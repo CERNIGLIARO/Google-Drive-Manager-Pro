@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Search.gs
- * Version : 2.0.0
+ * Version : 2.2.0
  *
  * RÔLE
  * ----
@@ -22,7 +22,7 @@
  * - anciens fichiers ;
  * - tri des résultats ;
  * - limites de sécurité pour les gros Drive ;
- * - continuation des recherches globales via les continuation tokens Apps Script.
+ * - continuation des recherches globales et des recherches dans un dossier.
  *
  * CONCEPTION GROS DRIVE
  * ---------------------
