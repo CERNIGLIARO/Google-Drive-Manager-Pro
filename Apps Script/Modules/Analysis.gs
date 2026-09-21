@@ -1,13 +1,14 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Analysis.gs
- * Version : 2.6.0
+ * Version : 2.6.1
  *
- * V2.6 - TURBO FAST ANALYSIS / DRIVE API v3
+ * V2.6.1 - PACKED TURBO FAST ANALYSIS / DRIVE API v3
  * --------------------------------------
  * Cette version conserve toutes les sécurités "gros Drive" et ajoute un moteur rapide :
  * - lecture des métadonnées par pages via Drive API v3 (jusqu'à 1000 éléments par requête) ;
  * - mode Turbo : plusieurs dossiers/pages sont traités en mémoire avant une seule sauvegarde ;
+ * - V2.6.1 : le frontier restant est compacté dans UNE seule tâche de continuation ;
  * - une page renvoie id, nom, type MIME, taille, date et parents en une seule requête ;
  * - repli automatique vers DriveApp si l'API avancée n'est pas disponible au démarrage ;
  * - l'ancien moteur DriveApp + continuationToken reste conservé comme secours ;
@@ -399,8 +400,20 @@ const GDM_Analysis = Object.freeze({
         initialFolderId
       );
 
-    var workQueue = [
-      {
+    /*
+     * V2.6.1 PACKED FRONTIER :
+     * une continuation Turbo peut transporter tous les dossiers restant à parcourir
+     * dans une seule tâche. Cela évite une Queue de plusieurs centaines d'entrées.
+     */
+    var workQueue =
+      this.unpackTurboFrontier_(
+        payload.turboFrontier
+      );
+
+    if (
+      !workQueue.length
+    ) {
+      workQueue.push({
         folderId:
           initialFolderId,
         folderName:
@@ -424,10 +437,10 @@ const GDM_Analysis = Object.freeze({
           payload.hasAnyFile === true,
         hasAnyFolder:
           payload.hasAnyFolder === true
-      }
-    ];
+      });
+    }
 
-    var deferredTasks = [];
+    var fallbackTasks = [];
     var maxPages =
       this.getTurboMaxPages_();
 
@@ -536,7 +549,7 @@ const GDM_Analysis = Object.freeze({
             );
           } catch (ignoredLog) {}
 
-          deferredTasks.push(
+          fallbackTasks.push(
             this.buildScanTask_({
               folderId:
                 work.folderId,
@@ -730,38 +743,52 @@ const GDM_Analysis = Object.freeze({
     }
 
     /*
-     * Tout ce qui n'a pas pu être traité dans ce lot Turbo
-     * est converti en tâches persistantes pour la reprise.
+     * V2.6.1 :
+     * au lieu d'ajouter un task Queue PAR dossier restant, on emballe tout le
+     * frontier dans UNE seule tâche de continuation. C'est le gain principal
+     * lorsque l'arborescence contient des centaines de petits dossiers.
      */
-    for (
-      var w = 0;
-      w < workQueue.length;
-      w++
+    var deferredTasks =
+      fallbackTasks.slice();
+
+    if (
+      workQueue.length
     ) {
 
-      var pendingWork =
-        workQueue[w];
+      var packedFrontier =
+        this.packTurboFrontier_(
+          workQueue
+        );
+
+      var firstPending =
+        workQueue[0];
 
       deferredTasks.push(
         this.buildScanTask_({
+          taskId:
+            this.makeStableTurboFrontierTaskId_(
+              packedFrontier
+            ),
           folderId:
-            pendingWork.folderId,
+            firstPending.folderId,
           folderName:
-            pendingWork.folderName,
+            firstPending.folderName,
           recursive:
             recursive,
           depth:
-            pendingWork.depth,
+            firstPending.depth,
           phase:
             this.PHASE_FAST_,
           continuationToken:
-            pendingWork.pageToken,
+            firstPending.pageToken,
           folderCounted:
-            pendingWork.folderCounted,
+            firstPending.folderCounted,
           hasAnyFile:
-            pendingWork.hasAnyFile,
+            firstPending.hasAnyFile,
           hasAnyFolder:
-            pendingWork.hasAnyFolder
+            firstPending.hasAnyFolder,
+          turboFrontier:
+            packedFrontier
         })
       );
     }
@@ -837,6 +864,10 @@ const GDM_Analysis = Object.freeze({
           fallbacks,
         pendingWork:
           workQueue.length,
+        packedFrontier:
+          workQueue.length > 0,
+        queueTasksCreated:
+          deferredTasks.length,
         tasksAdded:
           added,
         elapsedMs:
@@ -1419,11 +1450,15 @@ const GDM_Analysis = Object.freeze({
       );
 
     return {
-      taskId: this.makeStableScanTaskId_(
-        folderId,
-        phase,
-        continuationToken
-      ),
+      taskId:
+        GDM_Utils.trim(
+          options.taskId
+        ) ||
+        this.makeStableScanTaskId_(
+          folderId,
+          phase,
+          continuationToken
+        ),
       module: GDM_MODULES.ANALYSIS,
       action: GDM_ACTIONS.ANALYZE_FOLDER,
       itemId: folderId,
@@ -1454,10 +1489,226 @@ const GDM_Analysis = Object.freeze({
         continuationToken: continuationToken,
         folderCounted: options.folderCounted === true,
         hasAnyFile: options.hasAnyFile === true,
-        hasAnyFolder: options.hasAnyFolder === true
+        hasAnyFolder: options.hasAnyFolder === true,
+        turboFrontier:
+          Array.isArray(
+            options.turboFrontier
+          )
+            ? options.turboFrontier
+            : null
       },
-      maxRetries: 1
+      // Un timeout/reprise technique ne doit pas abandonner trop vite un gros lot Turbo.
+      maxRetries:
+        phase === this.PHASE_FAST_
+          ? 4
+          : 1
     };
+  },
+
+
+  /************************************************************************************************
+   * FRONTIER TURBO COMPACT
+   *
+   * Format de chaque entrée :
+   * [folderId, folderName, depth, pageToken, folderCounted, hasAnyFile, hasAnyFolder]
+   ************************************************************************************************/
+  packTurboFrontier_: function(
+    workQueue
+  ) {
+
+    workQueue =
+      Array.isArray(
+        workQueue
+      )
+        ? workQueue
+        : [];
+
+    var packed = [];
+
+    for (
+      var i = 0;
+      i < workQueue.length;
+      i++
+    ) {
+
+      var work =
+        workQueue[i] ||
+        {};
+
+      if (
+        !work.folderId
+      ) {
+        continue;
+      }
+
+      packed.push([
+        GDM_Utils.toString(
+          work.folderId
+        ),
+        GDM_Utils.toString(
+          work.folderName
+        ),
+        Math.max(
+          0,
+          GDM_Utils.toInteger(
+            work.depth,
+            0
+          )
+        ),
+        GDM_Utils.toString(
+          work.pageToken
+        ),
+        work.folderCounted === true
+          ? 1
+          : 0,
+        work.hasAnyFile === true
+          ? 1
+          : 0,
+        work.hasAnyFolder === true
+          ? 1
+          : 0
+      ]);
+    }
+
+    return packed;
+  },
+
+
+  unpackTurboFrontier_: function(
+    packed
+  ) {
+
+    if (
+      !Array.isArray(
+        packed
+      )
+    ) {
+      return [];
+    }
+
+    var workQueue = [];
+
+    for (
+      var i = 0;
+      i < packed.length;
+      i++
+    ) {
+
+      var row =
+        packed[i];
+
+      if (
+        !Array.isArray(
+          row
+        ) ||
+        !row[0]
+      ) {
+        continue;
+      }
+
+      workQueue.push({
+        folderId:
+          GDM_Utils.toString(
+            row[0]
+          ),
+        folderName:
+          GDM_Utils.toString(
+            row[1] ||
+            row[0]
+          ),
+        depth:
+          Math.max(
+            0,
+            GDM_Utils.toInteger(
+              row[2],
+              0
+            )
+          ),
+        pageToken:
+          GDM_Utils.toString(
+            row[3] ||
+            ''
+          ),
+        folderCounted:
+          Number(
+            row[4] ||
+            0
+          ) === 1,
+        hasAnyFile:
+          Number(
+            row[5] ||
+            0
+          ) === 1,
+        hasAnyFolder:
+          Number(
+            row[6] ||
+            0
+          ) === 1
+      });
+    }
+
+    return workQueue;
+  },
+
+
+  makeStableTurboFrontierTaskId_: function(
+    packedFrontier
+  ) {
+
+    var raw =
+      'TURBO_FRONTIER|' +
+      GDM_Utils.safeJsonStringify(
+        packedFrontier,
+        '[]'
+      );
+
+    var digest =
+      Utilities.computeDigest(
+        Utilities.DigestAlgorithm.MD5,
+        raw,
+        Utilities.Charset.UTF_8
+      );
+
+    var hex = '';
+
+    for (
+      var i = 0;
+      i < digest.length;
+      i++
+    ) {
+
+      var value =
+        digest[i];
+
+      if (
+        value < 0
+      ) {
+        value += 256;
+      }
+
+      var part =
+        value.toString(
+          16
+        );
+
+      if (
+        part.length < 2
+      ) {
+        part =
+          '0' +
+          part;
+      }
+
+      hex += part;
+    }
+
+    return (
+      'GDM_AN_TURBO_' +
+      hex.substring(
+        0,
+        20
+      )
+    );
   },
 
 
@@ -3196,7 +3447,7 @@ const GDM_Analysis = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Modules/Analysis.gs',
-      version: '2.6.0',
+      version: '2.6.1',
       readOnly: true,
       fastAnalysis: true,
       fastModeAvailable: this.shouldUseFastMode_(),
@@ -3204,6 +3455,11 @@ const GDM_Analysis = Object.freeze({
       turboMode: GDM_Config.get('ANALYSIS.TURBO_MODE', true) === true,
       turboMaxPagesPerTask: this.getTurboMaxPages_(),
       turboSoftLimitMs: this.getTurboSoftLimitMs_(),
+      turboPackedFrontier:
+        GDM_Config.get(
+          'ANALYSIS.TURBO_PACK_FRONTIER',
+          true
+        ) === true,
       antiStorageOverflow: true,
       resultStoreSeparated: true,
       continuationTokens: true,
@@ -3246,7 +3502,7 @@ function GDM_analysisHealthCheck() {
 
   return {
     ok: true,
-    version: '2.6.0',
+    version: '2.6.1',
     jobId: jobId,
     validation: GDM_Analysis.validate(),
     state: jobId ? GDM_State.getSummary(jobId) : null,
