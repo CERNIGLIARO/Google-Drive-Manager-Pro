@@ -664,20 +664,27 @@ const GDM_Queue = Object.freeze({
 
   readChunkedFromStore_: function(store, baseKey) {
     if (!store) return null;
-    var metaRaw = store.getProperty(baseKey + '_META');
+
+    // PERFORMANCE 2.6 : une seule lecture réseau pour la méta et tous les blocs.
+    var all = store.getProperties();
+    var metaRaw = all[baseKey + '_META'];
+
     if (!metaRaw) {
-      var direct = store.getProperty(baseKey);
+      var direct = all[baseKey];
       return direct ? GDM_Utils.safeJsonParse(direct, null) : null;
     }
+
     var meta = GDM_Utils.safeJsonParse(metaRaw, {});
     var count = Math.max(0, GDM_Utils.toInteger(meta.chunkCount, 0));
     if (!count) return null;
+
     var json = '';
     for (var i = 0; i < count; i++) {
-      var part = store.getProperty(baseKey + '_PART_' + i);
-      if (part === null) return null;
+      var part = all[baseKey + '_PART_' + i];
+      if (typeof part === 'undefined') return null;
       json += part;
     }
+
     return GDM_Utils.safeJsonParse(json, null);
   },
 
@@ -687,15 +694,31 @@ const GDM_Queue = Object.freeze({
     var chunks = [];
     for (var i = 0; i < json.length; i += chunkSize) chunks.push(json.substring(i, i + chunkSize));
     if (!chunks.length) chunks.push('{}');
+
     var maxChunks = Math.max(10, GDM_Utils.toInteger(GDM_Config.get('STATE.MAX_CHUNKS', 100), 100));
     if (chunks.length > maxChunks) {
       throw new Error('Queue trop volumineuse pour PropertiesService (' + chunks.length + ' blocs).');
     }
+
     var oldMeta = GDM_Utils.safeJsonParse(store.getProperty(baseKey + '_META'), {});
     var oldCount = Math.max(0, GDM_Utils.toInteger(oldMeta.chunkCount, 0));
-    for (var c = 0; c < chunks.length; c++) store.setProperty(baseKey + '_PART_' + c, chunks[c]);
-    for (var d = chunks.length; d < oldCount; d++) store.deleteProperty(baseKey + '_PART_' + d);
-    store.setProperty(baseKey + '_META', JSON.stringify({ chunkCount: chunks.length, length: json.length, updatedAt: GDM_Utils.nowIso() }));
+
+    // PERFORMANCE 2.6 : tous les blocs et la méta en une seule écriture réseau.
+    var batch = {};
+    for (var c = 0; c < chunks.length; c++) {
+      batch[baseKey + '_PART_' + c] = chunks[c];
+    }
+    batch[baseKey + '_META'] = JSON.stringify({
+      chunkCount: chunks.length,
+      length: json.length,
+      updatedAt: GDM_Utils.nowIso()
+    });
+    store.setProperties(batch, false);
+
+    for (var d = chunks.length; d < oldCount; d++) {
+      store.deleteProperty(baseKey + '_PART_' + d);
+    }
+
     store.deleteProperty(baseKey);
     return true;
   },
