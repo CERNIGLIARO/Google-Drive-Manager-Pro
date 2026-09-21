@@ -817,6 +817,10 @@ const GDM_Analysis = Object.freeze({
           true,
         turboMode:
           true,
+        turboMaxPagesPerTask:
+          maxPages,
+        turboSoftLimitMs:
+          softLimitMs,
         pagesProcessed:
           processedPages,
         foldersCounted:
