@@ -1683,7 +1683,11 @@ const GDM_FolderTools = Object.freeze({
 
 
     var continuation =
-      pending.length
+      (
+        pending.length &&
+        !stoppedByScanLimit &&
+        !stoppedByResultLimit
+      )
         ? {
             scope:
               'EMPTY_FOLDERS',
