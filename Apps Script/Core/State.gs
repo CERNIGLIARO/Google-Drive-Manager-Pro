@@ -1976,10 +1976,14 @@ const GDM_State = Object.freeze({
       PropertiesService
         .getScriptProperties();
 
+    // PERFORMANCE 2.6 : lire tous les blocs State en une seule opération réseau.
+    var allProperties =
+      properties.getProperties();
+
     var metaRaw =
-      properties.getProperty(
+      allProperties[
         baseKey + '_META'
-      );
+      ];
 
     /*
      * Compatibilité avec une éventuelle ancienne écriture
@@ -1988,9 +1992,9 @@ const GDM_State = Object.freeze({
     if (!metaRaw) {
 
       var direct =
-        properties.getProperty(
+        allProperties[
           baseKey
-        );
+        ];
 
       if (!direct) {
         return null;
@@ -2036,14 +2040,14 @@ const GDM_State = Object.freeze({
     ) {
 
       var chunk =
-        properties.getProperty(
+        allProperties[
           baseKey +
           '_PART_' +
           i
-        );
+        ];
 
       if (
-        chunk === null
+        typeof chunk === 'undefined'
       ) {
         return null;
       }
@@ -2178,23 +2182,44 @@ const GDM_State = Object.freeze({
       );
 
     /*
-     * Écriture des nouveaux morceaux.
+     * PERFORMANCE 2.6 :
+     * Écriture groupée des nouveaux morceaux + méta.
+     * L'ancienne version faisait un appel PropertiesService par morceau.
      */
+    var batch = {};
+
     for (
       var chunkIndex = 0;
       chunkIndex <
         chunks.length;
       chunkIndex++
     ) {
-      properties.setProperty(
+      batch[
         baseKey +
         '_PART_' +
-        chunkIndex,
-        chunks[
-          chunkIndex
-        ]
-      );
+        chunkIndex
+      ] = chunks[
+        chunkIndex
+      ];
     }
+
+    batch[
+      baseKey + '_META'
+    ] = JSON.stringify({
+      chunkCount:
+        chunks.length,
+
+      length:
+        json.length,
+
+      updatedAt:
+        GDM_Utils.nowIso()
+    });
+
+    properties.setProperties(
+      batch,
+      false
+    );
 
     /*
      * Suppression des anciens morceaux devenus inutiles.
@@ -2212,20 +2237,6 @@ const GDM_State = Object.freeze({
         oldIndex
       );
     }
-
-    properties.setProperty(
-      baseKey + '_META',
-      JSON.stringify({
-        chunkCount:
-          chunks.length,
-
-        length:
-          json.length,
-
-        updatedAt:
-          GDM_Utils.nowIso()
-      })
-    );
 
     /*
      * Nettoyage d'une éventuelle ancienne version non fractionnée.
