@@ -2045,6 +2045,12 @@
             </button>
 
             <button
+              class="btn btn-secondary"
+              onclick="recoverJob()">
+              🛠 Récupérer
+            </button>
+
+            <button
               class="btn btn-danger"
               onclick="cancelJob()">
               ⛔ Annuler
@@ -4216,6 +4222,39 @@ async function resumeJob() {
       false
     );
   }
+}
+
+
+async function recoverJob() {
+
+  if (
+    !UI.currentJobId
+  ) {
+
+    showToast(
+      'Aucun job courant.',
+      'error'
+    );
+
+    return;
+  }
+
+
+  if (
+    !confirm(
+      'Récupérer ce traitement ?\n\nCette action remet à zéro les tâches restées bloquées en cours et relance le job sans annuler les opérations déjà terminées.'
+    )
+  ) {
+
+    return;
+  }
+
+
+  await simpleJobAction(
+    'GDM_apiRecoverJob',
+    UI.currentJobId,
+    'Traitement récupéré et prêt à reprendre.'
+  );
 }
 
 
