@@ -304,9 +304,9 @@ const GDM_CONFIG = Object.freeze({
     // au lieu d'effectuer plusieurs appels DriveApp pour chaque fichier.
     FAST_MODE: true,
 
-    // 250 garde la queue compacte tout en analysant jusqu'à 250 éléments
-    // par requête réseau.
-    FAST_PAGE_SIZE: 250,
+    // Mode rapide : jusqu'à 1000 éléments par requête Drive API v3.
+    // Cela réduit fortement le nombre de pages et les sauvegardes intermédiaires.
+    FAST_PAGE_SIZE: 1000,
 
     // En cas d'indisponibilité temporaire de l'API avancée, l'ancien
     // moteur DriveApp reste utilisable automatiquement.
