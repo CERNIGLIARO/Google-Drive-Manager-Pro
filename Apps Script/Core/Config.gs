@@ -528,7 +528,10 @@ const GDM_CONFIG = Object.freeze({
     CLEAN_COMPLETED_JOBS_AFTER_DAYS: 30,
 
     // Nettoyage léger exécuté à l'ouverture du Dashboard.
-    AUTO_CLEANUP_ON_INITIALIZE: true
+    AUTO_CLEANUP_ON_INITIALIZE: true,
+
+    // Un état non terminal sans queue depuis plus de 3 minutes est considéré orphelin.
+    ORPHAN_JOB_GRACE_MS: 180000
   }),
 
 
