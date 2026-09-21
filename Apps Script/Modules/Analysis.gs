@@ -417,25 +417,32 @@ const GDM_Analysis = Object.freeze({
     var response;
 
     try {
+      var listOptions = {
+        q:
+          "'" +
+          folderId.replace(/'/g, "\\'") +
+          "' in parents and trashed = false",
+        pageSize:
+          this.getFastPageSize_(),
+        spaces:
+          'drive',
+        supportsAllDrives:
+          true,
+        includeItemsFromAllDrives:
+          true,
+        fields:
+          'nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails)'
+      };
+
+      if (pageToken) {
+        listOptions.pageToken =
+          pageToken;
+      }
+
       response =
-        Drive.Files.list({
-          q:
-            "'" +
-            folderId.replace(/'/g, "\\'") +
-            "' in parents and trashed = false",
-          pageSize:
-            this.getFastPageSize_(),
-          pageToken:
-            pageToken || null,
-          spaces:
-            'drive',
-          supportsAllDrives:
-            true,
-          includeItemsFromAllDrives:
-            true,
-          fields:
-            'nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails)'
-        });
+        Drive.Files.list(
+          listOptions
+        );
     } catch (fastError) {
 
       /*
