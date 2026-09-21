@@ -1382,62 +1382,15 @@ const GDM_Analysis = Object.freeze({
       return 0;
     }
 
-    var existingIds = {};
-
-    try {
-      var queue = GDM_Queue.get(jobId);
-
-      if (
-        queue &&
-        Array.isArray(queue.tasks)
-      ) {
-
-        for (
-          var i = 0;
-          i < queue.tasks.length;
-          i++
-        ) {
-
-          if (queue.tasks[i].taskId) {
-            existingIds[
-              queue.tasks[i].taskId
-            ] = true;
-          }
-        }
-      }
-    } catch (ignoredQueueRead) {}
-
-    var unique = [];
-
-    for (
-      var j = 0;
-      j < tasks.length;
-      j++
-    ) {
-
-      var task = tasks[j];
-
-      if (
-        task.taskId &&
-        existingIds[task.taskId]
-      ) {
-        continue;
-      }
-
-      if (task.taskId) {
-        existingIds[task.taskId] = true;
-      }
-
-      unique.push(task);
-    }
-
-    if (!unique.length) {
-      return 0;
-    }
-
+    /*
+     * PERFORMANCE 2.6 :
+     * GDM_Queue.addMany() déduplique déjà les taskId.
+     * L'ancienne version relisait toute la queue ici puis la relisait encore
+     * dans addMany(), ce qui doublait le coût PropertiesService à chaque page.
+     */
     var added = GDM_Queue.addInBatches(
       jobId,
-      unique,
+      tasks,
       Math.min(
         100,
         GDM_Config.get(
@@ -1450,7 +1403,11 @@ const GDM_Analysis = Object.freeze({
     var addedCount =
       added && added.length
         ? added.length
-        : unique.length;
+        : 0;
+
+    if (!addedCount) {
+      return 0;
+    }
 
     var latestState =
       GDM_State.require(jobId);
@@ -2663,19 +2620,37 @@ const GDM_Analysis = Object.freeze({
           )
         );
 
-        // On écrase d'abord les morceaux existants.
+        /*
+         * PERFORMANCE 2.6 :
+         * écrire tous les morceaux + la méta en une seule opération réseau.
+         * setProperty() bloc par bloc était très coûteux sur les résultats volumineux.
+         */
+        var batch = {};
+
         for (
           var c = 0;
           c < chunks.length;
           c++
         ) {
-          store.setProperty(
-            baseKey + '_PART_' + c,
-            chunks[c]
-          );
+          batch[
+            baseKey + '_PART_' + c
+          ] = chunks[c];
         }
 
-        // Puis on enlève les anciens morceaux devenus inutiles.
+        batch[
+          baseKey + '_META'
+        ] = JSON.stringify({
+          chunkCount: chunks.length,
+          length: json.length,
+          updatedAt: GDM_Utils.nowIso()
+        });
+
+        store.setProperties(
+          batch,
+          false
+        );
+
+        // Puis on enlève uniquement les anciens morceaux devenus inutiles.
         for (
           var oldIndex = chunks.length;
           oldIndex < oldCount;
@@ -2685,15 +2660,6 @@ const GDM_Analysis = Object.freeze({
             baseKey + '_PART_' + oldIndex
           );
         }
-
-        store.setProperty(
-          baseKey + '_META',
-          JSON.stringify({
-            chunkCount: chunks.length,
-            length: json.length,
-            updatedAt: GDM_Utils.nowIso()
-          })
-        );
 
         store.deleteProperty(baseKey);
 
@@ -2713,13 +2679,19 @@ const GDM_Analysis = Object.freeze({
       return null;
     }
 
-    var metaRaw = store.getProperty(
+    /*
+     * PERFORMANCE 2.6 :
+     * une seule lecture PropertiesService pour la méta et tous les morceaux.
+     */
+    var all = store.getProperties();
+
+    var metaRaw = all[
       baseKey + '_META'
-    );
+    ];
 
     if (!metaRaw) {
 
-      var direct = store.getProperty(baseKey);
+      var direct = all[baseKey];
 
       return direct
         ? GDM_Utils.safeJsonParse(
@@ -2754,11 +2726,11 @@ const GDM_Analysis = Object.freeze({
       i++
     ) {
 
-      var part = store.getProperty(
+      var part = all[
         baseKey + '_PART_' + i
-      );
+      ];
 
-      if (part === null) {
+      if (typeof part === 'undefined') {
         return null;
       }
 
