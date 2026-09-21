@@ -25,7 +25,7 @@
 
 const GDM_Engine = Object.freeze({
   RUN_LOCK_PREFIX_: 'GDMV2_ENGINE_RUN_',
-  SAFE_MAX_TASKS_PER_RUN_: 50,
+  SAFE_MAX_TASKS_PER_RUN_: 100,
   SAFE_HARD_RUNTIME_MS_: 180000,
   BUSY_RETRY_DELAY_MS_: 10000,
   STALE_TOKEN_AFTER_MS_: 240000,
@@ -245,11 +245,23 @@ const GDM_Engine = Object.freeze({
 
       try {
         try {
-          GDM_State.setCurrentItem(jobId, {
-            id: task.itemId || '',
-            name: task.itemName || '',
-            taskId: task.taskId || ''
-          });
+          /*
+           * PERFORMANCE 2.6 :
+           * les tâches Analysis sont très courtes en mode Drive API.
+           * Mettre State à jour pour chaque dossier doublait inutilement les écritures.
+           * On conserve l'indication du dossier courant au début puis tous les 10 dossiers.
+           */
+          if (
+            task.module !== GDM_MODULES.ANALYSIS ||
+            processedThisRun === 1 ||
+            processedThisRun % 10 === 0
+          ) {
+            GDM_State.setCurrentItem(jobId, {
+              id: task.itemId || '',
+              name: task.itemName || '',
+              taskId: task.taskId || ''
+            });
+          }
         } catch (ignoredCurrentItem) {}
 
         var moduleResult = this.executeTask_(task, {
