@@ -301,7 +301,26 @@ const GDM_Engine = Object.freeze({
         }
 
         GDM_Queue.completeTask(jobId, task.taskId, moduleResult);
-        GDM_State.increment(jobId, { processed: 1, success: 1 });
+
+        var successCounters = {
+          processed: 1,
+          success: 1
+        };
+
+        if (
+          task.module === GDM_MODULES.ANALYSIS &&
+          moduleResult.data &&
+          moduleResult.data.turboMode === true
+        ) {
+          successCounters.telemetry =
+            moduleResult.data;
+        }
+
+        GDM_State.increment(
+          jobId,
+          successCounters
+        );
+
         successThisRun++;
 
       } catch (taskError) {
