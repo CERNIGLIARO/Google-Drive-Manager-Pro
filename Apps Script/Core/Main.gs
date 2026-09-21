@@ -89,11 +89,18 @@ const GDM_Main = Object.freeze({
     ) {
       try {
         maintenance.cleanup =
-          GDM_State.cleanupOldJobs(
-            GDM_Config.get(
-              'STATE.CLEAN_COMPLETED_JOBS_AFTER_DAYS',
-              30
-            )
+          this.cleanup({
+            completedJobsOlderThanDays:
+              GDM_Config.get(
+                'STATE.CLEAN_COMPLETED_JOBS_AFTER_DAYS',
+                30
+              )
+          });
+
+        maintenance.removedOrphanTriggers =
+          Number(
+            maintenance.cleanup.removedOrphanTriggers ||
+            0
           );
       } catch (ignoredCleanup) {
         maintenance.cleanup = {
@@ -103,11 +110,6 @@ const GDM_Main = Object.freeze({
           )
         };
       }
-
-      try {
-        maintenance.removedOrphanTriggers =
-          GDM_Engine.cleanupOwnTriggers_();
-      } catch (ignoredTriggerCleanup) {}
     }
 
     var currentJobId = GDM_State.getCurrentJobId();
@@ -641,6 +643,54 @@ const GDM_Main = Object.freeze({
     );
 
     var stateCleanup = GDM_State.cleanupOldJobs(days);
+    var deletedJobIds =
+      stateCleanup && Array.isArray(stateCleanup.deleted)
+        ? stateCleanup.deleted
+        : [];
+
+    var queuesDeleted = 0;
+    var logsDeleted = 0;
+
+    /*
+     * State.cleanupOldJobs() supprime l'état et le résultat principal.
+     * Les queues et logs utilisent leurs propres stores : on les purge ici
+     * pour éviter une accumulation invisible dans PropertiesService.
+     */
+    for (
+      var i = 0;
+      i < deletedJobIds.length;
+      i++
+    ) {
+      var deletedJobId =
+        deletedJobIds[i];
+
+      try {
+        if (
+          typeof GDM_Queue !== 'undefined' &&
+          GDM_Queue &&
+          typeof GDM_Queue.delete === 'function'
+        ) {
+          GDM_Queue.delete(
+            deletedJobId
+          );
+          queuesDeleted++;
+        }
+      } catch (ignoredQueueCleanup) {}
+
+      try {
+        if (
+          typeof GDM_Logger !== 'undefined' &&
+          GDM_Logger &&
+          typeof GDM_Logger.clear === 'function'
+        ) {
+          GDM_Logger.clear(
+            deletedJobId
+          );
+          logsDeleted++;
+        }
+      } catch (ignoredLogCleanup) {}
+    }
+
     var removedTriggers = 0;
 
     try {
@@ -651,6 +701,8 @@ const GDM_Main = Object.freeze({
       ok: true,
       completedJobsOlderThanDays: days,
       stateCleanup: stateCleanup,
+      queuesDeleted: queuesDeleted,
+      logsDeleted: logsDeleted,
       removedOrphanTriggers: removedTriggers
     };
   },
