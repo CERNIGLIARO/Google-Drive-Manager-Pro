@@ -1,12 +1,16 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Analysis.gs
- * Version : 2.4.0
+ * Version : 2.5.0
  *
- * STABILISATION "GROS DRIVE" / CONTINUATION TOKENS
+ * V2.5 - FAST ANALYSIS / DRIVE API v3
  * --------------------------------------
- * Cette version corrige les blocages de scan ET les risques de saturation du stockage :
- * - chaque gros dossier est découpé en petits lots avec continuationToken DriveApp ;
+ * Cette version conserve toutes les sécurités "gros Drive" et ajoute un moteur rapide :
+ * - lecture des métadonnées par pages via Drive API v3 (jusqu'à 250 éléments par requête) ;
+ * - une page renvoie id, nom, type MIME, taille, date et parents en une seule requête ;
+ * - repli automatique vers DriveApp si l'API avancée n'est pas disponible au démarrage ;
+ * - l'ancien moteur DriveApp + continuationToken reste conservé comme secours ;
+ * - chaque gros dossier reste découpé en petits lots et repris automatiquement ;
  * - une tâche Analysis ne garde jamais le moteur plusieurs minutes sur un seul dossier ;
  * - le résultat détaillé de l'analyse n'est plus stocké avec la Queue/State/Logs dans ScriptProperties ;
  * - il utilise DocumentProperties (avec repli ScriptProperties si nécessaire) ;
@@ -39,9 +43,11 @@ const GDM_Analysis = Object.freeze({
 
   // Scanner un gros dossier en petites portions. Le batch est volontairement plafonné
   // pour que chaque tâche rende la main au moteur bien avant la limite Apps Script.
+  PHASE_FAST_: 'FAST',
   PHASE_FILES_: 'FILES',
   PHASE_FOLDERS_: 'FOLDERS',
   MAX_BATCH_SIZE_: 100,
+  FAST_MAX_PAGE_SIZE_: 1000,
   TASK_SOFT_LIMIT_MS_: 40000,
 
 
@@ -90,6 +96,9 @@ const GDM_Analysis = Object.freeze({
       )
     );
 
+    var fastMode =
+      this.shouldUseFastMode_();
+
     var state = GDM_State.create({
       module: GDM_MODULES.ANALYSIS,
       action:
@@ -105,7 +114,8 @@ const GDM_Analysis = Object.freeze({
       parameters: {
         recursive: recursive,
         largeFileMB: largeFileMB,
-        oldFileDays: oldFileDays
+        oldFileDays: oldFileDays,
+        fastMode: fastMode
       },
 
       totalKnown: 1,
@@ -137,7 +147,8 @@ const GDM_Analysis = Object.freeze({
       },
       recursive: recursive,
       largeFileMB: largeFileMB,
-      oldFileDays: oldFileDays
+      oldFileDays: oldFileDays,
+      fastMode: fastMode
     });
 
     GDM_Queue.create(jobId);
@@ -152,7 +163,10 @@ const GDM_Analysis = Object.freeze({
         folderName: sourceFolderName,
         recursive: recursive,
         depth: 0,
-        phase: this.PHASE_FILES_,
+        phase:
+          fastMode
+            ? this.PHASE_FAST_
+            : this.PHASE_FILES_,
         continuationToken: '',
         folderCounted: false,
         hasAnyFile: false,
@@ -192,6 +206,7 @@ const GDM_Analysis = Object.freeze({
         name: sourceFolderName
       },
       recursive: recursive,
+      fastMode: fastMode,
       state: GDM_State.getSummary(jobId),
       queue: GDM_Queue.getMeta(jobId),
       engine: engineResult
@@ -256,10 +271,14 @@ const GDM_Analysis = Object.freeze({
       GDM_Utils.trim(payload.phase || this.PHASE_FILES_).toUpperCase();
 
     if (
+      phase !== this.PHASE_FAST_ &&
       phase !== this.PHASE_FILES_ &&
       phase !== this.PHASE_FOLDERS_
     ) {
-      phase = this.PHASE_FILES_;
+      phase =
+        this.shouldUseFastMode_()
+          ? this.PHASE_FAST_
+          : this.PHASE_FILES_;
     }
 
     var result = this.getResult(jobId);
@@ -271,6 +290,18 @@ const GDM_Analysis = Object.freeze({
         largeFileMB: parameters.largeFileMB,
         oldFileDays: parameters.oldFileDays
       });
+    }
+
+    if (
+      phase === this.PHASE_FAST_
+    ) {
+      return this.processFastFolderPage_(
+        jobId,
+        task,
+        payload,
+        recursive,
+        result
+      );
     }
 
     var folder;
@@ -331,6 +362,438 @@ const GDM_Analysis = Object.freeze({
       payload,
       recursive,
       result
+    );
+  },
+
+
+  /************************************************************************************************
+   * FAST ANALYSIS - DRIVE API V3
+   *
+   * Une seule requête renvoie jusqu'à FAST_PAGE_SIZE éléments avec leurs métadonnées.
+   * Les fichiers sont analysés directement depuis les objets JSON de l'API.
+   * Les dossiers enfants deviennent des tâches FAST séparées.
+   ************************************************************************************************/
+  processFastFolderPage_: function(
+    jobId,
+    task,
+    payload,
+    recursive,
+    result
+  ) {
+
+    var folderId =
+      GDM_Utils.requireString(
+        payload.folderId ||
+        task.itemId,
+        'folderId'
+      );
+
+    var folderName =
+      GDM_Utils.toString(
+        payload.folderName ||
+        task.itemName ||
+        folderId
+      );
+
+    var pageToken =
+      GDM_Utils.toString(
+        payload.continuationToken ||
+        ''
+      );
+
+    var hasAnyFile =
+      payload.hasAnyFile === true;
+
+    var hasAnyFolder =
+      payload.hasAnyFolder === true;
+
+    if (
+      payload.folderCounted !== true
+    ) {
+      result.totals.folders++;
+      payload.folderCounted = true;
+    }
+
+    var response;
+
+    try {
+      var listOptions = {
+        q:
+          "'" +
+          folderId.replace(/'/g, "\\'") +
+          "' in parents and trashed = false",
+        pageSize:
+          this.getFastPageSize_(),
+        spaces:
+          'drive',
+        supportsAllDrives:
+          true,
+        includeItemsFromAllDrives:
+          true,
+        fields:
+          'nextPageToken,files(id,name,mimeType,size,modifiedTime,parents,shortcutDetails)'
+      };
+
+      if (pageToken) {
+        listOptions.pageToken =
+          pageToken;
+      }
+
+      response =
+        Drive.Files.list(
+          listOptions
+        );
+    } catch (fastError) {
+
+      /*
+       * Le repli n'est sûr que sur la première page : après une page FAST déjà
+       * comptabilisée, repartir depuis le début avec DriveApp doublerait les totaux.
+       */
+      if (
+        !pageToken &&
+        GDM_Config.get(
+          'ANALYSIS.FAST_FALLBACK_TO_DRIVEAPP',
+          true
+        )
+      ) {
+
+        try {
+          GDM_Logger.warn(
+            'FAST ANALYSIS indisponible. Repli DriveApp.',
+            {
+              jobId: jobId,
+              module: GDM_MODULES.ANALYSIS,
+              action: GDM_ACTIONS.ANALYZE_FOLDER,
+              itemId: folderId,
+              itemName: folderName,
+              data: {
+                error:
+                  GDM_Utils.getErrorMessage(
+                    fastError
+                  )
+              }
+            }
+          );
+        } catch (ignoredLog) {}
+
+        var fallbackTask =
+          this.buildScanTask_({
+            folderId:
+              folderId,
+            folderName:
+              folderName,
+            recursive:
+              recursive,
+            depth:
+              payload.depth,
+            phase:
+              this.PHASE_FILES_,
+            continuationToken:
+              '',
+            folderCounted:
+              true,
+            hasAnyFile:
+              hasAnyFile,
+            hasAnyFolder:
+              hasAnyFolder
+          });
+
+        result.updatedAt =
+          GDM_Utils.nowIso();
+
+        this.saveResultSafely_(
+          jobId,
+          result
+        );
+
+        var fallbackAdded =
+          this.addUniqueTasksAndIncreaseTotal_(
+            jobId,
+            [fallbackTask]
+          );
+
+        return {
+          ok: true,
+          skipped: false,
+          message:
+            'FAST ANALYSIS indisponible pour ' +
+            folderName +
+            '. Repli DriveApp planifié.',
+          data: {
+            folderId:
+              folderId,
+            fastMode:
+              false,
+            fallback:
+              true,
+            tasksAdded:
+              fallbackAdded
+          }
+        };
+      }
+
+      throw fastError;
+    }
+
+    var items =
+      response &&
+      Array.isArray(
+        response.files
+      )
+        ? response.files
+        : [];
+
+    var nextTasks = [];
+    var scannedFiles = 0;
+    var scannedFolders = 0;
+    var localErrors = 0;
+
+    for (
+      var i = 0;
+      i < items.length;
+      i++
+    ) {
+
+      var item =
+        items[i] ||
+        {};
+
+      var mimeType =
+        GDM_Utils.toString(
+          item.mimeType
+        );
+
+      if (
+        mimeType ===
+        GDM_MIME.FOLDER
+      ) {
+
+        scannedFolders++;
+        hasAnyFolder = true;
+
+        if (recursive) {
+          nextTasks.push(
+            this.buildScanTask_({
+              folderId:
+                item.id,
+              folderName:
+                item.name ||
+                item.id,
+              recursive:
+                true,
+              depth:
+                Math.max(
+                  0,
+                  GDM_Utils.toInteger(
+                    payload.depth,
+                    0
+                  )
+                ) + 1,
+              phase:
+                this.PHASE_FAST_,
+              continuationToken:
+                '',
+              folderCounted:
+                false,
+              hasAnyFile:
+                false,
+              hasAnyFolder:
+                false
+            })
+          );
+        }
+
+        continue;
+      }
+
+      scannedFiles++;
+      hasAnyFile = true;
+
+      try {
+        this.analyzeFileMetadata_(
+          result,
+          item,
+          folderId,
+          folderName
+        );
+      } catch (fileError) {
+
+        this.addError_(
+          result,
+          fileError,
+          {
+            itemId:
+              item.id || '',
+            itemName:
+              item.name || '',
+            folderId:
+              folderId,
+            folderName:
+              folderName,
+            type:
+              'FAST_FILE_ANALYSIS'
+          }
+        );
+
+        localErrors++;
+      }
+    }
+
+    var nextPageToken =
+      GDM_Utils.toString(
+        response &&
+        response.nextPageToken
+          ? response.nextPageToken
+          : ''
+      );
+
+    if (nextPageToken) {
+      nextTasks.push(
+        this.buildScanTask_({
+          folderId:
+            folderId,
+          folderName:
+            folderName,
+          recursive:
+            recursive,
+          depth:
+            payload.depth,
+          phase:
+            this.PHASE_FAST_,
+          continuationToken:
+            nextPageToken,
+          folderCounted:
+            true,
+          hasAnyFile:
+            hasAnyFile,
+          hasAnyFolder:
+            hasAnyFolder
+        })
+      );
+    } else if (
+      GDM_Config.get(
+        'ANALYSIS.DETECT_EMPTY_FOLDERS',
+        true
+      ) &&
+      !hasAnyFile &&
+      !hasAnyFolder
+    ) {
+
+      result.counters.emptyFolders++;
+
+      this.pushLimited_(
+        result.emptyFolders,
+        {
+          id:
+            folderId,
+          name:
+            folderName,
+          url:
+            GDM_Utils.getDriveFolderUrl(
+              folderId
+            )
+        },
+        this.getResultListLimit_(),
+        result.truncated,
+        'emptyFolders'
+      );
+    }
+
+    result.updatedAt =
+      GDM_Utils.nowIso();
+
+    this.saveResultSafely_(
+      jobId,
+      result
+    );
+
+    var added =
+      this.addUniqueTasksAndIncreaseTotal_(
+        jobId,
+        nextTasks
+      );
+
+    return {
+      ok: true,
+      skipped: false,
+      message:
+        'FAST ANALYSIS : ' +
+        folderName +
+        ' (' +
+        scannedFiles +
+        ' fichier(s), ' +
+        scannedFolders +
+        ' dossier(s)' +
+        (nextPageToken
+          ? ', page suivante planifiée'
+          : '') +
+        ')',
+      data: {
+        folderId:
+          folderId,
+        phase:
+          this.PHASE_FAST_,
+        fastMode:
+          true,
+        scanned:
+          items.length,
+        scannedFiles:
+          scannedFiles,
+        scannedFolders:
+          scannedFolders,
+        errors:
+          localErrors,
+        continuation:
+          Boolean(
+            nextPageToken
+          ),
+        tasksAdded:
+          added
+      }
+    };
+  },
+
+
+  shouldUseFastMode_: function() {
+
+    if (
+      GDM_Config.get(
+        'ANALYSIS.FAST_MODE',
+        true
+      ) !== true
+    ) {
+      return false;
+    }
+
+    try {
+      return (
+        typeof Drive !==
+          'undefined' &&
+        Drive &&
+        Drive.Files &&
+        typeof Drive.Files.list ===
+          'function'
+      );
+    } catch (ignored) {
+      return false;
+    }
+  },
+
+
+  getFastPageSize_: function() {
+
+    return Math.max(
+      50,
+      Math.min(
+        this.FAST_MAX_PAGE_SIZE_,
+        GDM_Utils.toPositiveInteger(
+          GDM_Config.get(
+            'ANALYSIS.FAST_PAGE_SIZE',
+            250
+          ),
+          250
+        )
+      )
     );
   },
 
@@ -1093,139 +1556,341 @@ const GDM_Analysis = Object.freeze({
    ************************************************************************************************/
   analyzeFile_: function(result, file, parentFolder) {
 
-    var fileId = file.getId();
-    var fileName = file.getName();
-    var mimeType = file.getMimeType();
+    var parentId = '';
+    var parentName = '';
+
+    if (parentFolder) {
+      parentId =
+        this.safeGetId_(
+          parentFolder
+        );
+
+      parentName =
+        this.safeGetName_(
+          parentFolder
+        );
+    } else {
+      try {
+        var parent =
+          GDM_Utils.getFirstParentInfo(
+            file
+          );
+
+        parentId =
+          parent &&
+          parent.id
+            ? parent.id
+            : '';
+
+        parentName =
+          parent &&
+          parent.name
+            ? parent.name
+            : '';
+      } catch (ignoredParent) {}
+    }
 
     var size = 0;
 
     try {
-      size = Number(file.getSize()) || 0;
+      size =
+        Number(
+          file.getSize()
+        ) || 0;
     } catch (ignoredSize) {}
 
     var updated = null;
 
     try {
-      updated = file.getLastUpdated();
+      updated =
+        file.getLastUpdated();
     } catch (ignoredDate) {}
 
-    var extension = GDM_Utils.getExtension(fileName);
+    var url = '';
 
-    var parentId = '';
-    var parentName = '';
+    try {
+      url =
+        file.getUrl();
+    } catch (ignoredUrl) {}
 
-    if (parentFolder) {
+    return this.analyzeFileData_(
+      result,
+      {
+        id:
+          file.getId(),
+        name:
+          file.getName(),
+        mimeType:
+          file.getMimeType(),
+        size:
+          size,
+        updated:
+          updated,
+        folderId:
+          parentId,
+        folderName:
+          parentName,
+        url:
+          url
+      }
+    );
+  },
 
-      parentId = this.safeGetId_(parentFolder);
-      parentName = this.safeGetName_(parentFolder);
 
-    } else {
+  analyzeFileMetadata_: function(
+    result,
+    item,
+    parentFolderId,
+    parentFolderName
+  ) {
 
-      try {
-        var parent = GDM_Utils.getFirstParentInfo(file);
-        parentId = parent && parent.id ? parent.id : '';
-        parentName = parent && parent.name ? parent.name : '';
-      } catch (ignoredParent) {}
-    }
+    item =
+      item ||
+      {};
+
+    return this.analyzeFileData_(
+      result,
+      {
+        id:
+          GDM_Utils.toString(
+            item.id
+          ),
+        name:
+          GDM_Utils.toString(
+            item.name
+          ),
+        mimeType:
+          GDM_Utils.toString(
+            item.mimeType
+          ),
+        size:
+          Number(
+            item.size || 0
+          ) || 0,
+        updated:
+          item.modifiedTime
+            ? GDM_Utils.toDate(
+                item.modifiedTime
+              )
+            : null,
+        folderId:
+          GDM_Utils.toString(
+            parentFolderId
+          ),
+        folderName:
+          GDM_Utils.toString(
+            parentFolderName
+          ),
+        url:
+          GDM_Utils.getDriveFileUrl(
+            item.id
+          )
+      }
+    );
+  },
+
+
+  analyzeFileData_: function(
+    result,
+    data
+  ) {
+
+    data =
+      data ||
+      {};
+
+    var fileId =
+      GDM_Utils.toString(
+        data.id
+      );
+
+    var fileName =
+      GDM_Utils.toString(
+        data.name
+      );
+
+    var mimeType =
+      GDM_Utils.toString(
+        data.mimeType
+      );
+
+    var size =
+      Number(
+        data.size || 0
+      ) || 0;
+
+    var updated =
+      GDM_Utils.toDate(
+        data.updated
+      );
+
+    var extension =
+      GDM_Utils.getExtension(
+        fileName
+      );
+
+    var parentId =
+      GDM_Utils.toString(
+        data.folderId
+      );
+
+    var parentName =
+      GDM_Utils.toString(
+        data.folderName
+      );
 
     result.totals.files++;
     result.totals.bytes += size;
 
-    /**********************************************************************************************
-     * EXTENSION
-     **********************************************************************************************/
-    var extensionKey = extension || '(sans extension)';
+    var extensionKey =
+      extension ||
+      '(sans extension)';
 
-    if (!result.extensions[extensionKey]) {
-      result.extensions[extensionKey] = {
+    if (
+      !result.extensions[
+        extensionKey
+      ]
+    ) {
+      result.extensions[
+        extensionKey
+      ] = {
         files: 0,
         bytes: 0
       };
     }
 
-    result.extensions[extensionKey].files++;
-    result.extensions[extensionKey].bytes += size;
+    result.extensions[
+      extensionKey
+    ].files++;
 
+    result.extensions[
+      extensionKey
+    ].bytes += size;
 
-    /**********************************************************************************************
-     * MIME
-     **********************************************************************************************/
-    var mimeKey = mimeType || '(inconnu)';
+    var mimeKey =
+      mimeType ||
+      '(inconnu)';
 
-    if (!result.mimeTypes[mimeKey]) {
-      result.mimeTypes[mimeKey] = {
+    if (
+      !result.mimeTypes[
+        mimeKey
+      ]
+    ) {
+      result.mimeTypes[
+        mimeKey
+      ] = {
         files: 0,
         bytes: 0
       };
     }
 
-    result.mimeTypes[mimeKey].files++;
-    result.mimeTypes[mimeKey].bytes += size;
+    result.mimeTypes[
+      mimeKey
+    ].files++;
 
+    result.mimeTypes[
+      mimeKey
+    ].bytes += size;
 
-    /**********************************************************************************************
-     * OBJET FICHIER COMPACT
-     **********************************************************************************************/
     var fileObject = {
-      id: fileId,
-      name: fileName,
-      extension: extension,
-      mimeType: mimeType,
-      size: size,
-      sizeFormatted: GDM_Utils.formatBytes(size),
-      updated: GDM_Utils.toIso(updated),
-      folderId: parentId,
-      folderName: parentName
+      id:
+        fileId,
+      name:
+        fileName,
+      extension:
+        extension,
+      mimeType:
+        mimeType,
+      size:
+        size,
+      sizeFormatted:
+        GDM_Utils.formatBytes(
+          size
+        ),
+      updated:
+        GDM_Utils.toIso(
+          updated
+        ),
+      folderId:
+        parentId,
+      folderName:
+        parentName,
+      url:
+        GDM_Utils.toString(
+          data.url
+        ) ||
+        GDM_Utils.getDriveFileUrl(
+          fileId
+        )
     };
 
-    // URL seulement si elle est lisible.
-    try {
-      fileObject.url = file.getUrl();
-    } catch (ignoredUrl) {
-      fileObject.url = '';
-    }
+    if (
+      GDM_Config.get(
+        'ANALYSIS.DETECT_LARGE_FILES',
+        true
+      )
+    ) {
 
+      var largeLimit =
+        GDM_Utils.mbToBytes(
+          result.parameters.largeFileMB
+        );
 
-    /**********************************************************************************************
-     * GROS FICHIERS
-     **********************************************************************************************/
-    if (GDM_Config.get('ANALYSIS.DETECT_LARGE_FILES', true)) {
-
-      var largeLimit = GDM_Utils.mbToBytes(
-        result.parameters.largeFileMB
-      );
-
-      if (size >= largeLimit) {
+      if (
+        size >=
+        largeLimit
+      ) {
 
         result.counters.largeFiles++;
 
-        result.largeFiles.push(fileObject);
-
-        result.largeFiles.sort(function(a, b) {
-          return Number(b.size || 0) - Number(a.size || 0);
-        });
-
-        var topLimit = Math.min(
-          this.getResultListLimit_(),
-          GDM_Utils.toPositiveInteger(
-            GDM_Config.get('ANALYSIS.TOP_FILES', 200),
-            200
-          )
+        result.largeFiles.push(
+          fileObject
         );
 
-        if (result.largeFiles.length > topLimit) {
-          result.largeFiles = result.largeFiles.slice(0, topLimit);
-          result.truncated.largeFiles = true;
+        result.largeFiles.sort(
+          function(a, b) {
+            return Number(
+              b.size || 0
+            ) -
+            Number(
+              a.size || 0
+            );
+          }
+        );
+
+        var topLimit =
+          Math.min(
+            this.getResultListLimit_(),
+            GDM_Utils.toPositiveInteger(
+              GDM_Config.get(
+                'ANALYSIS.TOP_FILES',
+                200
+              ),
+              200
+            )
+          );
+
+        if (
+          result.largeFiles.length >
+          topLimit
+        ) {
+          result.largeFiles =
+            result.largeFiles.slice(
+              0,
+              topLimit
+            );
+
+          result.truncated.largeFiles =
+            true;
         }
       }
     }
 
-
-    /**********************************************************************************************
-     * ANCIENS FICHIERS
-     **********************************************************************************************/
     if (
-      GDM_Config.get('ANALYSIS.DETECT_OLD_FILES', true) &&
+      GDM_Config.get(
+        'ANALYSIS.DETECT_OLD_FILES',
+        true
+      ) &&
       updated &&
       GDM_Utils.isOlderThanDays(
         updated,
@@ -1244,14 +1909,15 @@ const GDM_Analysis = Object.freeze({
       );
     }
 
-
-    /**********************************************************************************************
-     * SANS EXTENSION
-     **********************************************************************************************/
     if (
-      GDM_Config.get('ANALYSIS.DETECT_NO_EXTENSION', true) &&
+      GDM_Config.get(
+        'ANALYSIS.DETECT_NO_EXTENSION',
+        true
+      ) &&
       !extension &&
-      !GDM_Utils.isGoogleMimeType(mimeType)
+      !GDM_Utils.isGoogleMimeType(
+        mimeType
+      )
     ) {
 
       result.counters.noExtensionFiles++;
@@ -1265,13 +1931,14 @@ const GDM_Analysis = Object.freeze({
       );
     }
 
-
-    /**********************************************************************************************
-     * RACCOURCIS
-     **********************************************************************************************/
     if (
-      GDM_Config.get('ANALYSIS.DETECT_SHORTCUTS', true) &&
-      GDM_Utils.isShortcutMimeType(mimeType)
+      GDM_Config.get(
+        'ANALYSIS.DETECT_SHORTCUTS',
+        true
+      ) &&
+      GDM_Utils.isShortcutMimeType(
+        mimeType
+      )
     ) {
 
       result.counters.shortcuts++;
@@ -1284,6 +1951,8 @@ const GDM_Analysis = Object.freeze({
         'shortcuts'
       );
     }
+
+    return fileObject;
   },
 
 
@@ -1323,7 +1992,12 @@ const GDM_Analysis = Object.freeze({
         oldFileDays: GDM_Utils.toInteger(
           options.oldFileDays,
           GDM_Config.get('ANALYSIS.OLD_FILE_DAYS', 365)
-        )
+        ),
+        fastMode:
+          GDM_Utils.toBoolean(
+            options.fastMode,
+            this.shouldUseFastMode_()
+          )
       },
 
       startedAt: GDM_Utils.nowIso(),
@@ -2413,8 +3087,11 @@ const GDM_Analysis = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Modules/Analysis.gs',
-      version: '2.3.0',
+      version: '2.5.0',
       readOnly: true,
+      fastAnalysis: true,
+      fastModeAvailable: this.shouldUseFastMode_(),
+      fastPageSize: this.getFastPageSize_(),
       antiStorageOverflow: true,
       resultStoreSeparated: true,
       continuationTokens: true,
@@ -2445,7 +3122,7 @@ function GDM_apiGetAnalysisResult(jobId) {
 
 
 /**************************************************************************************************
- * DIAGNOSTIC RAPIDE ANALYSIS 2.3
+ * DIAGNOSTIC RAPIDE ANALYSIS 2.5
  **************************************************************************************************/
 function GDM_analysisHealthCheck() {
 
@@ -2457,7 +3134,7 @@ function GDM_analysisHealthCheck() {
 
   return {
     ok: true,
-    version: '2.3.0',
+    version: '2.5.0',
     jobId: jobId,
     validation: GDM_Analysis.validate(),
     state: jobId ? GDM_State.getSummary(jobId) : null,
