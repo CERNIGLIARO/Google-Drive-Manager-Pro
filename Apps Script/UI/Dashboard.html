@@ -4127,6 +4127,18 @@ function updateJobUI(
     );
 
 
+  const telemetry =
+    state.telemetry ||
+    null;
+
+
+  const performanceHtml =
+    buildPerformanceHtml(
+      state,
+      telemetry
+    );
+
+
   const html =
     '<div>' +
 
@@ -4209,6 +4221,8 @@ function updateJobUI(
           : ''
       ) +
 
+      performanceHtml +
+
     '</div>';
 
 
@@ -4267,6 +4281,296 @@ function updateJobUI(
       ''
     );
   }
+}
+
+
+/**************************************************************************************************
+ * PERFORMANCE TURBO
+ **************************************************************************************************/
+
+function buildPerformanceHtml(
+  state,
+  telemetry
+) {
+
+  if (
+    !state ||
+    state.module !== 'Analysis' ||
+    !telemetry ||
+    telemetry.turboMode !== true
+  ) {
+    return '';
+  }
+
+
+  const lastElapsedMs =
+    Number(
+      telemetry.lastElapsedMs ||
+      0
+    );
+
+
+  const lastFiles =
+    Number(
+      telemetry.lastFiles ||
+      0
+    );
+
+
+  const lastSpeed =
+    lastElapsedMs > 0
+      ? lastFiles /
+        (
+          lastElapsedMs /
+          1000
+        )
+      : 0;
+
+
+  const cumulativeFiles =
+    Number(
+      telemetry.cumulativeFiles ||
+      0
+    );
+
+
+  const cumulativeActiveMs =
+    Number(
+      telemetry.cumulativeActiveMs ||
+      0
+    );
+
+
+  const activeAverageSpeed =
+    cumulativeActiveMs > 0
+      ? cumulativeFiles /
+        (
+          cumulativeActiveMs /
+          1000
+        )
+      : 0;
+
+
+  const startedMs =
+    state.startedAt
+      ? Date.parse(
+          state.startedAt
+        )
+      : NaN;
+
+
+  const wallElapsedMs =
+    Number.isFinite(
+      startedMs
+    )
+      ? Math.max(
+          0,
+          Date.now() -
+          startedMs
+        )
+      : 0;
+
+
+  const wallAverageSpeed =
+    wallElapsedMs > 0
+      ? cumulativeFiles /
+        (
+          wallElapsedMs /
+          1000
+        )
+      : 0;
+
+
+  return (
+    '<div style="margin-top:12px;padding:10px 12px;border:1px solid #bbf7d0;background:#f0fdf4;border-radius:9px;">' +
+
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px;">' +
+        '<strong>⚡ TURBO actif</strong>' +
+        '<span class="badge badge-running">' +
+          escapeHtml(
+            String(
+              Number(
+                telemetry.turboMaxPagesPerTask ||
+                1
+              )
+            )
+          ) +
+          ' pages/lot max' +
+        '</span>' +
+      '</div>' +
+
+      '<div class="grid" style="gap:8px;font-size:12px;">' +
+
+        '<div><span class="muted">Dernier lot :</span> ' +
+          escapeHtml(
+            String(
+              Number(
+                telemetry.lastPages ||
+                0
+              )
+            )
+          ) +
+          ' page(s), ' +
+          escapeHtml(
+            String(
+              lastFiles
+            )
+          ) +
+          ' fichier(s)</div>' +
+
+        '<div><span class="muted">Temps du lot :</span> ' +
+          escapeHtml(
+            formatDurationMs(
+              lastElapsedMs
+            )
+          ) +
+        '</div>' +
+
+        '<div><span class="muted">Vitesse dernier lot :</span> ' +
+          escapeHtml(
+            formatRate(
+              lastSpeed
+            )
+          ) +
+        '</div>' +
+
+        '<div><span class="muted">Moyenne active :</span> ' +
+          escapeHtml(
+            formatRate(
+              activeAverageSpeed
+            )
+          ) +
+        '</div>' +
+
+        '<div><span class="muted">Depuis le début :</span> ' +
+          escapeHtml(
+            formatDurationMs(
+              wallElapsedMs
+            )
+          ) +
+        '</div>' +
+
+        '<div><span class="muted">Moyenne globale :</span> ' +
+          escapeHtml(
+            formatRate(
+              wallAverageSpeed
+            )
+          ) +
+        '</div>' +
+
+        '<div><span class="muted">Cumul Turbo :</span> ' +
+          escapeHtml(
+            String(
+              Number(
+                telemetry.cumulativePages ||
+                0
+              )
+            )
+          ) +
+          ' page(s), ' +
+          escapeHtml(
+            String(
+              cumulativeFiles
+            )
+          ) +
+          ' fichier(s)</div>' +
+
+      '</div>' +
+
+    '</div>'
+  );
+}
+
+
+function formatRate(
+  value
+) {
+
+  value =
+    Number(
+      value ||
+      0
+    );
+
+
+  if (
+    !Number.isFinite(
+      value
+    ) ||
+    value <= 0
+  ) {
+    return '—';
+  }
+
+
+  return (
+    value >= 10
+      ? value.toFixed(
+          0
+        )
+      : value.toFixed(
+          1
+        )
+  ) +
+  ' fichiers/s';
+}
+
+
+function formatDurationMs(
+  ms
+) {
+
+  ms =
+    Math.max(
+      0,
+      Number(
+        ms ||
+        0
+      )
+    );
+
+
+  if (
+    ms < 1000
+  ) {
+    return Math.round(
+      ms
+    ) +
+    ' ms';
+  }
+
+
+  const totalSeconds =
+    Math.floor(
+      ms /
+      1000
+    );
+
+
+  const minutes =
+    Math.floor(
+      totalSeconds /
+      60
+    );
+
+
+  const seconds =
+    totalSeconds %
+    60;
+
+
+  if (
+    minutes <= 0
+  ) {
+    return totalSeconds +
+      ' s';
+  }
+
+
+  return minutes +
+    ' min ' +
+    seconds +
+    ' s';
 }
 
 
