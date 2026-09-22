@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Maintenance_Reset.gs
- * Version : 2.2.0
+ * Version : 2.6.2
  *
  * RESET TECHNIQUE COMPLET
  * -----------------------
@@ -117,10 +117,24 @@ function GDM_RESET_COMPLET_A_ZERO() {
     report.warnings.push('Deuxième passe DocumentProperties : ' + String(e6));
   }
 
+  // V2.6.2 : la Queue est maintenant dans UserProperties.
+  try {
+    var userStoreSecond = PropertiesService.getUserProperties();
+
+    if (userStoreSecond) {
+      var userSecond = GDM_resetCleanStore_(userStoreSecond);
+
+      report.userPropertiesDeleted += userSecond.deleted;
+      report.approxCharsFreed += userSecond.charsFreed;
+    }
+  } catch (e7) {
+    report.warnings.push('Deuxième passe UserProperties : ' + String(e7));
+  }
+
   try {
     report.triggersDeleted += GDM_resetDeleteTriggers_();
-  } catch (e7) {
-    report.warnings.push('Deuxième passe triggers : ' + String(e7));
+  } catch (e8) {
+    report.warnings.push('Deuxième passe triggers : ' + String(e8));
   }
 
   report.finishedAt = new Date().toISOString();
