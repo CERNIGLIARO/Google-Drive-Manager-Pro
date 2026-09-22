@@ -1,7 +1,7 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Core/Config.gs
- * Version : 2.6.1
+ * Version : 2.6.2
  *
  * RÔLE
  * ----
@@ -27,7 +27,7 @@
 const GDM_APP = Object.freeze({
   NAME: 'Google Drive Manager PRO',
   SHORT_NAME: 'GDM PRO',
-  VERSION: '2.6.1',
+  VERSION: '2.6.2',
   MAJOR_VERSION: 2,
   BUILD_DATE: '2026-09-21',
   ENVIRONMENT: 'production'
@@ -327,8 +327,9 @@ const GDM_CONFIG = Object.freeze({
     // moteur DriveApp reste utilisable automatiquement.
     FAST_FALLBACK_TO_DRIVEAPP: true,
 
-    // Conserver quelques analyses récentes au lieu d'effacer tout l'historique.
-    KEEP_RECENT_RESULTS: 1,
+    // V2.6.2 : ne conserver que le résultat du job courant.
+    // Évite de cumuler plusieurs gros résultats dans DocumentProperties.
+    KEEP_RECENT_RESULTS: 0,
 
     INCLUDE_SUBFOLDERS_DEFAULT: true,
 
