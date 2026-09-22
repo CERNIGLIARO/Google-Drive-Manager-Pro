@@ -7,7 +7,7 @@
  * - réduire drastiquement les écritures PropertiesService ;
  * - ne plus persister les événements très bavards (QUEUE_UPDATED / ITEM_PROCESSED) ;
  * - limiter les logs persistants à 120 entrées ;
- * - stocker les logs dans DocumentProperties (repli ScriptProperties) ;
+ * - V2.6.2 : stocker les logs dans ScriptProperties, séparés de Queue et Analysis ;
  * - lire encore les anciens logs ScriptProperties pour compatibilité ;
  * - conserver l'API publique existante de GDM_Logger.
  **************************************************************************************************/
@@ -231,8 +231,16 @@ const GDM_Logger = Object.freeze({
     jobId = GDM_Utils.trim(jobId) || '_GLOBAL_';
     var primary = this.readPersistentPrimary_(jobId);
     if (primary.length) return primary;
-    // Compatibilité : lire l'ancien stockage ScriptProperties si le nouveau est vide.
+    // Compatibilité : lire les anciens stockages User/Document si le nouveau est vide.
     var primaryStore = this.getLogStore_();
+
+    try {
+      var userStore = PropertiesService.getUserProperties();
+      if (userStore && userStore !== primaryStore) {
+        var userLogs = this.readPersistentFromStore_(userStore, jobId);
+        if (userLogs.length) return userLogs.slice(-this.PERSIST_MAX_);
+      }
+    } catch (ignoredUserLegacy) {}
 
     try {
       var docStore = PropertiesService.getDocumentProperties();
@@ -241,14 +249,6 @@ const GDM_Logger = Object.freeze({
         if (docLogs.length) return docLogs.slice(-this.PERSIST_MAX_);
       }
     } catch (ignoredDocLegacy) {}
-
-    try {
-      var scriptStore = PropertiesService.getScriptProperties();
-      if (scriptStore !== primaryStore) {
-        var legacy = this.readPersistentFromStore_(scriptStore, jobId);
-        if (legacy.length) return legacy.slice(-this.PERSIST_MAX_);
-      }
-    } catch (ignoredScriptLegacy) {}
 
     return [];
   },
@@ -331,21 +331,22 @@ const GDM_Logger = Object.freeze({
 
   getLogStore_: function() {
     /*
-     * Les logs sont volontairement isolés dans UserProperties :
-     * State reste dans ScriptProperties et Queue/Analysis dans DocumentProperties.
-     * On évite ainsi que les logs remplissent le même quota que la queue.
+     * V2.6.2 :
+     * Logs + State restent dans ScriptProperties.
+     * Queue est isolée dans UserProperties.
+     * Analysis Result est isolé dans DocumentProperties.
      */
+    try {
+      var script = PropertiesService.getScriptProperties();
+      if (script) return script;
+    } catch (ignoredScript) {}
+
     try {
       var user = PropertiesService.getUserProperties();
       if (user) return user;
     } catch (ignoredUser) {}
 
-    try {
-      var doc = PropertiesService.getDocumentProperties();
-      if (doc) return doc;
-    } catch (ignoredDoc) {}
-
-    return PropertiesService.getScriptProperties();
+    return PropertiesService.getDocumentProperties();
   },
 
   filterLogs_: function(logs, options) {
