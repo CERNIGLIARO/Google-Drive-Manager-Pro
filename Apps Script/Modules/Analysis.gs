@@ -1,9 +1,9 @@
 /**************************************************************************************************
  * Google Drive Manager PRO V2
  * Fichier : Modules/Analysis.gs
- * Version : 2.6.1
+ * Version : 2.6.2
  *
- * V2.6.1 - PACKED TURBO FAST ANALYSIS / DRIVE API v3
+ * V2.6.2 - PACKED TURBO / ANTI-QUOTA
  * --------------------------------------
  * Cette version conserve toutes les sécurités "gros Drive" et ajoute un moteur rapide :
  * - lecture des métadonnées par pages via Drive API v3 (jusqu'à 1000 éléments par requête) ;
@@ -35,8 +35,9 @@ const GDM_Analysis = Object.freeze({
 
   RESULT_PREFIX_: 'GDMV2_ANALYSIS_RESULT_',
 
-  // On garde une marge confortable sous la limite globale de 500 Ko de PropertiesService.
-  MAX_RESULT_JSON_CHARS_: 180000,
+  // V2.6.2 : marge renforcée dans DocumentProperties.
+  // Les compteurs restent complets ; seules les listes détaillées sont compactées.
+  MAX_RESULT_JSON_CHARS_: 120000,
 
   // Limites de détails : les compteurs restent complets, seules les listes affichables sont tronquées.
   MAX_DETAIL_ROWS_: 250,
@@ -3447,7 +3448,7 @@ const GDM_Analysis = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Modules/Analysis.gs',
-      version: '2.6.1',
+      version: '2.6.2',
       readOnly: true,
       fastAnalysis: true,
       fastModeAvailable: this.shouldUseFastMode_(),
@@ -3502,7 +3503,7 @@ function GDM_analysisHealthCheck() {
 
   return {
     ok: true,
-    version: '2.6.1',
+    version: '2.6.2',
     jobId: jobId,
     validation: GDM_Analysis.validate(),
     state: jobId ? GDM_State.getSummary(jobId) : null,
