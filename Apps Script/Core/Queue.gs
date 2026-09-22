@@ -612,7 +612,7 @@ const GDM_Queue = Object.freeze({
 
   readQueue_: function(jobId) {
     var value = this.readChunkedFromPrimary_(GDM_Config.queueKey(jobId));
-    if (!value) value = this.readChunkedFromLegacyScript_(GDM_Config.queueKey(jobId));
+    if (!value) value = this.readChunkedFromLegacyStores_(GDM_Config.queueKey(jobId));
     if (value) this.ensureQueueShape_(value);
     return value;
   },
@@ -629,7 +629,7 @@ const GDM_Queue = Object.freeze({
 
   readMeta_: function(jobId) {
     var value = this.readChunkedFromPrimary_(GDM_Config.queueMetaKey(jobId));
-    if (!value) value = this.readChunkedFromLegacyScript_(GDM_Config.queueMetaKey(jobId));
+    if (!value) value = this.readChunkedFromLegacyStores_(GDM_Config.queueMetaKey(jobId));
     return value;
   },
 
@@ -644,10 +644,24 @@ const GDM_Queue = Object.freeze({
   },
 
   getQueueStore_: function() {
+    /*
+     * V2.6.2 ANTI-QUOTA :
+     * Queue -> UserProperties
+     * Analysis Result -> DocumentProperties
+     * State / Engine / Logs -> ScriptProperties
+     *
+     * Cela sépare les trois principaux consommateurs de stockage.
+     */
+    try {
+      var user = PropertiesService.getUserProperties();
+      if (user) return user;
+    } catch (ignoredUser) {}
+
     try {
       var doc = PropertiesService.getDocumentProperties();
       if (doc) return doc;
-    } catch (ignored) {}
+    } catch (ignoredDoc) {}
+
     return PropertiesService.getScriptProperties();
   },
 
@@ -655,11 +669,26 @@ const GDM_Queue = Object.freeze({
     return this.readChunkedFromStore_(this.getQueueStore_(), baseKey);
   },
 
-  readChunkedFromLegacyScript_: function(baseKey) {
+  readChunkedFromLegacyStores_: function(baseKey) {
     var primary = this.getQueueStore_();
-    var script = PropertiesService.getScriptProperties();
-    if (primary === script) return null;
-    return this.readChunkedFromStore_(script, baseKey);
+    var stores = [];
+
+    try {
+      var doc = PropertiesService.getDocumentProperties();
+      if (doc && doc !== primary) stores.push(doc);
+    } catch (ignoredDoc) {}
+
+    try {
+      var script = PropertiesService.getScriptProperties();
+      if (script && script !== primary) stores.push(script);
+    } catch (ignoredScript) {}
+
+    for (var i = 0; i < stores.length; i++) {
+      var value = this.readChunkedFromStore_(stores[i], baseKey);
+      if (value) return value;
+    }
+
+    return null;
   },
 
   readChunkedFromStore_: function(store, baseKey) {
@@ -724,9 +753,16 @@ const GDM_Queue = Object.freeze({
   },
 
   chunkExistsInAnyStore_: function(baseKey) {
-    if (this.chunkExistsInStore_(this.getQueueStore_(), baseKey)) return true;
-    var script = PropertiesService.getScriptProperties();
-    if (script !== this.getQueueStore_() && this.chunkExistsInStore_(script, baseKey)) return true;
+    var stores = [];
+
+    try { var user = PropertiesService.getUserProperties(); if (user) stores.push(user); } catch (ignoredUser) {}
+    try { var doc = PropertiesService.getDocumentProperties(); if (doc) stores.push(doc); } catch (ignoredDoc) {}
+    try { var script = PropertiesService.getScriptProperties(); if (script) stores.push(script); } catch (ignoredScript) {}
+
+    for (var i = 0; i < stores.length; i++) {
+      if (this.chunkExistsInStore_(stores[i], baseKey)) return true;
+    }
+
     return false;
   },
 
@@ -736,9 +772,13 @@ const GDM_Queue = Object.freeze({
 
   deleteChunkedEverywhere_: function(baseKey) {
     var stores = [];
+    try { var user = PropertiesService.getUserProperties(); if (user) stores.push(user); } catch (ignoredUser) {}
     try { var doc = PropertiesService.getDocumentProperties(); if (doc) stores.push(doc); } catch (ignoredDoc) {}
-    try { stores.push(PropertiesService.getScriptProperties()); } catch (ignoredScript) {}
-    for (var s = 0; s < stores.length; s++) this.deleteChunkedFromStore_(stores[s], baseKey);
+    try { var script = PropertiesService.getScriptProperties(); if (script) stores.push(script); } catch (ignoredScript) {}
+
+    for (var s = 0; s < stores.length; s++) {
+      this.deleteChunkedFromStore_(stores[s], baseKey);
+    }
   },
 
   deleteChunkedFromStore_: function(store, baseKey) {
@@ -770,7 +810,7 @@ const GDM_Queue = Object.freeze({
     return {
       ok: errors.length === 0,
       file: 'Core/Queue.gs',
-      storage: 'DocumentProperties avec repli ScriptProperties',
+      storage: 'UserProperties avec compatibilité DocumentProperties/ScriptProperties',
       perTaskRetries: true,
       progressiveCompaction: true,
       errors: errors
